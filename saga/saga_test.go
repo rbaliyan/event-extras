@@ -598,4 +598,49 @@ func TestResume(t *testing.T) {
 			t.Error("expected error for non-existent saga")
 		}
 	})
+
+	t.Run("Resume failed saga re-executes successfully", func(t *testing.T) {
+		store := NewMemoryStore()
+
+		// First execution: step-2 fails, saga becomes compensated
+		failingStep := newMockStep("step-2")
+		failingStep.executeErr = errors.New("transient failure")
+
+		step1 := newMockStep("step-1")
+		s := New("test-saga", step1, failingStep).WithStore(store)
+
+		err := s.Execute(ctx, "saga-resume", "test-data")
+		if err == nil {
+			t.Fatal("expected error from first execution")
+		}
+
+		state, _ := store.Get(ctx, "saga-resume")
+		if state.Status != StatusCompensated {
+			t.Fatalf("expected compensated, got %s", state.Status)
+		}
+
+		// Fix the step (clear the error) and resume
+		step2Fixed := newMockStep("step-2")
+		step1Resume := newMockStep("step-1")
+		s2 := New("test-saga", step1Resume, step2Fixed).WithStore(store)
+
+		err = s2.Resume(ctx, "saga-resume")
+		if err != nil {
+			t.Fatalf("Resume failed: %v", err)
+		}
+
+		// Verify saga completed
+		state, _ = store.Get(ctx, "saga-resume")
+		if state.Status != StatusCompleted {
+			t.Errorf("expected completed after resume, got %s", state.Status)
+		}
+
+		// Verify both steps were executed on resume
+		if !step1Resume.wasExecuted() {
+			t.Error("step-1 should have been executed on resume")
+		}
+		if !step2Fixed.wasExecuted() {
+			t.Error("step-2 should have been executed on resume")
+		}
+	})
 }
