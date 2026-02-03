@@ -487,6 +487,11 @@ func (s *Saga) Steps() []Step {
 //	    // Compensations have already run - order is in consistent state
 //	}
 func (s *Saga) Execute(ctx context.Context, id string, data any) error {
+	return s.execute(ctx, id, data, false)
+}
+
+// execute is the internal execution method shared by Execute and Resume.
+func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) error {
 	sagaStart := time.Now()
 
 	// Record saga start if metrics enabled
@@ -505,12 +510,20 @@ func (s *Saga) Execute(ctx context.Context, id string, data any) error {
 
 	// Persist initial state
 	if s.store != nil {
-		if err := s.store.Create(ctx, state); err != nil {
-			// Record saga end on early failure
-			if s.metrics != nil {
-				s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
+		if resume {
+			if err := s.store.Update(ctx, state); err != nil {
+				if s.metrics != nil {
+					s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
+				}
+				return fmt.Errorf("update saga state for resume: %w", err)
 			}
-			return fmt.Errorf("create saga state: %w", err)
+		} else {
+			if err := s.store.Create(ctx, state); err != nil {
+				if s.metrics != nil {
+					s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
+				}
+				return fmt.Errorf("create saga state: %w", err)
+			}
 		}
 	}
 
@@ -743,11 +756,5 @@ func (s *Saga) Resume(ctx context.Context, id string) error {
 		return fmt.Errorf("saga is not in failed state: %s", state.Status)
 	}
 
-	// Reset and re-execute
-	state.Status = StatusRunning
-	state.Error = ""
-	state.CompletedAt = nil
-	state.CompletedSteps = nil
-
-	return s.Execute(ctx, id, state.Data)
+	return s.execute(ctx, id, state.Data, true)
 }
