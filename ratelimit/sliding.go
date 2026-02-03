@@ -44,6 +44,7 @@ type SlidingWindowLimiter struct {
 	key    string
 	limit  int           // Maximum events per window
 	window time.Duration // Window duration
+	script *redis.Script // Cached Lua script for atomic sliding window check
 }
 
 // NewSlidingWindowLimiter creates a new sliding window rate limiter.
@@ -64,6 +65,29 @@ func NewSlidingWindowLimiter(client redis.Cmdable, key string, limit int, window
 		key:    "ratelimit:sliding:" + key,
 		limit:  limit,
 		window: window,
+		script: redis.NewScript(`
+			local key = KEYS[1]
+			local windowStart = tonumber(ARGV[1])
+			local limit = tonumber(ARGV[2])
+			local now = ARGV[3]
+			local windowMs = tonumber(ARGV[4])
+
+			-- Remove old entries
+			redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
+
+			-- Count current entries
+			local count = redis.call('ZCARD', key)
+
+			if count >= limit then
+				return 0
+			end
+
+			-- Add new entry
+			redis.call('ZADD', key, now, now)
+			redis.call('PEXPIRE', key, windowMs)
+
+			return 1
+		`),
 	}
 }
 
@@ -76,32 +100,7 @@ func (s *SlidingWindowLimiter) Allow(ctx context.Context) bool {
 	windowStart := now.Add(-s.window).UnixMicro()
 	member := fmt.Sprintf("%d", now.UnixMicro())
 
-	// Lua script for atomic sliding window check
-	script := redis.NewScript(`
-		local key = KEYS[1]
-		local windowStart = tonumber(ARGV[1])
-		local limit = tonumber(ARGV[2])
-		local now = ARGV[3]
-		local windowMs = tonumber(ARGV[4])
-
-		-- Remove old entries
-		redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
-
-		-- Count current entries
-		local count = redis.call('ZCARD', key)
-
-		if count >= limit then
-			return 0
-		end
-
-		-- Add new entry
-		redis.call('ZADD', key, now, now)
-		redis.call('PEXPIRE', key, windowMs)
-
-		return 1
-	`)
-
-	result, err := script.Run(ctx, s.client, []string{s.key},
+	result, err := s.script.Run(ctx, s.client, []string{s.key},
 		windowStart,
 		s.limit,
 		member,

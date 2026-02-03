@@ -42,6 +42,7 @@ type RedisLimiter struct {
 	key    string
 	limit  int           // Maximum events per window
 	window time.Duration // Window duration
+	script *redis.Script // Cached Lua script for atomic increment and check
 }
 
 // NewRedisLimiter creates a new Redis-based rate limiter.
@@ -65,6 +66,21 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 		key:    "ratelimit:" + key,
 		limit:  limit,
 		window: window,
+		script: redis.NewScript(`
+			local key = KEYS[1]
+			local limit = tonumber(ARGV[1])
+			local window = tonumber(ARGV[2])
+
+			local current = redis.call('INCR', key)
+			if current == 1 then
+				redis.call('EXPIRE', key, window)
+			end
+
+			if current > limit then
+				return 0
+			end
+			return 1
+		`),
 	}
 }
 
@@ -73,24 +89,7 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 // Uses a Lua script for atomic increment and check. On Redis error,
 // returns true (fail open) to prevent blocking all requests.
 func (r *RedisLimiter) Allow(ctx context.Context) bool {
-	// Lua script for atomic increment and check
-	script := redis.NewScript(`
-		local key = KEYS[1]
-		local limit = tonumber(ARGV[1])
-		local window = tonumber(ARGV[2])
-
-		local current = redis.call('INCR', key)
-		if current == 1 then
-			redis.call('EXPIRE', key, window)
-		end
-
-		if current > limit then
-			return 0
-		end
-		return 1
-	`)
-
-	result, err := script.Run(ctx, r.client, []string{r.key}, r.limit, int(r.window.Seconds())).Int()
+	result, err := r.script.Run(ctx, r.client, []string{r.key}, r.limit, int(r.window.Seconds())).Int()
 	if err != nil {
 		// On error, allow the request (fail open)
 		return true
@@ -104,6 +103,9 @@ func (r *RedisLimiter) Allow(ctx context.Context) bool {
 // Polls Allow() with a delay based on the rate limit. Returns nil
 // when allowed, or context error if the context expires.
 func (r *RedisLimiter) Wait(ctx context.Context) error {
+	backoff := time.Millisecond * 10
+	maxBackoff := r.window / time.Duration(r.limit)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -112,8 +114,12 @@ func (r *RedisLimiter) Wait(ctx context.Context) error {
 			if r.Allow(ctx) {
 				return nil
 			}
-			// Wait before retrying
-			time.Sleep(r.window / time.Duration(r.limit))
+			// Exponential backoff with max
+			time.Sleep(backoff)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 		}
 	}
 }
