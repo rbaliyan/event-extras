@@ -328,9 +328,8 @@ type Saga struct {
 //	)
 func New(name string, steps ...Step) *Saga {
 	return &Saga{
-		name:   name,
-		steps:  steps,
-		logger: slog.Default().With("saga", name),
+		name:  name,
+		steps: steps,
 	}
 }
 
@@ -358,6 +357,7 @@ func (s *Saga) WithStore(store Store) *Saga {
 // WithLogger sets a custom logger.
 //
 // The logger is used to log step execution, failures, and compensations.
+// If not set, slog.Default() is used.
 //
 // Parameters:
 //   - logger: The slog logger to use
@@ -366,6 +366,15 @@ func (s *Saga) WithStore(store Store) *Saga {
 func (s *Saga) WithLogger(logger *slog.Logger) *Saga {
 	s.logger = logger.With("saga", s.name)
 	return s
+}
+
+// log returns the configured logger, falling back to slog.Default().
+func (s *Saga) log() *slog.Logger {
+	if s.logger != nil {
+		return s.logger
+	}
+	s.logger = slog.Default().With("saga", s.name)
+	return s.logger
 }
 
 // WithMetrics enables OpenTelemetry metrics collection for the saga.
@@ -532,7 +541,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 	for i, step := range s.steps {
 		state.CurrentStep = i
 
-		s.logger.Info("executing step",
+		s.log().Info("executing step",
 			"saga_id", id,
 			"step", step.Name(),
 			"step_index", i)
@@ -549,7 +558,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 			// Wait for backoff delay on retry (not on first attempt)
 			if attempt > 0 && s.backoff != nil {
 				backoffDelay := s.backoff.NextDelay(attempt - 1)
-				s.logger.Info("retrying step after backoff",
+				s.log().Info("retrying step after backoff",
 					"saga_id", id,
 					"step", step.Name(),
 					"attempt", attempt+1,
@@ -583,7 +592,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 
 			// Log retry attempt
 			if attempt < maxAttempts-1 {
-				s.logger.Warn("step failed, will retry",
+				s.log().Warn("step failed, will retry",
 					"saga_id", id,
 					"step", step.Name(),
 					"attempt", attempt+1,
@@ -593,7 +602,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 		}
 
 		if err != nil {
-			s.logger.Error("step failed",
+			s.log().Error("step failed",
 				"saga_id", id,
 				"step", step.Name(),
 				"error", err)
@@ -627,7 +636,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 		state.CompletedSteps = append(state.CompletedSteps, step.Name())
 		s.updateState(ctx, state)
 
-		s.logger.Debug("step completed",
+		s.log().Debug("step completed",
 			"saga_id", id,
 			"step", step.Name())
 	}
@@ -642,7 +651,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 		s.metrics.RecordSagaEnd(ctx, s.name, StatusCompleted, time.Since(sagaStart))
 	}
 
-	s.logger.Info("saga completed",
+	s.log().Info("saga completed",
 		"saga_id", id,
 		"steps", len(s.steps))
 
@@ -651,7 +660,7 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 
 // compensate runs compensations in reverse order
 func (s *Saga) compensate(ctx context.Context, id string, completedSteps []Step, data any) error {
-	s.logger.Info("starting compensation",
+	s.log().Info("starting compensation",
 		"saga_id", id,
 		"steps_to_compensate", len(completedSteps))
 
@@ -660,7 +669,7 @@ func (s *Saga) compensate(ctx context.Context, id string, completedSteps []Step,
 	for i := len(completedSteps) - 1; i >= 0; i-- {
 		step := completedSteps[i]
 
-		s.logger.Info("compensating step",
+		s.log().Info("compensating step",
 			"saga_id", id,
 			"step", step.Name())
 
@@ -678,7 +687,7 @@ func (s *Saga) compensate(ctx context.Context, id string, completedSteps []Step,
 		}
 
 		if err != nil {
-			s.logger.Error("compensation failed",
+			s.log().Error("compensation failed",
 				"saga_id", id,
 				"step", step.Name(),
 				"error", err)
@@ -692,7 +701,7 @@ func (s *Saga) compensate(ctx context.Context, id string, completedSteps []Step,
 		return fmt.Errorf("compensation errors: %v", compensateErrors)
 	}
 
-	s.logger.Info("compensation completed",
+	s.log().Info("compensation completed",
 		"saga_id", id)
 
 	return nil
@@ -704,7 +713,7 @@ func (s *Saga) updateState(ctx context.Context, state *State) {
 
 	if s.store != nil {
 		if err := s.store.Update(ctx, state); err != nil {
-			s.logger.Error("failed to update saga state",
+			s.log().Error("failed to update saga state",
 				"saga_id", state.ID,
 				"error", err)
 		}
