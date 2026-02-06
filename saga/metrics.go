@@ -203,39 +203,3 @@ func (m *MetricsRecorder) RecordCompensation(ctx context.Context, sagaName, step
 	m.stepDuration.Record(ctx, duration.Seconds(), attrs)
 }
 
-// metricsHook wraps step execution with metrics recording.
-// This is used internally by the Saga when metrics are enabled.
-type metricsHook struct {
-	recorder *MetricsRecorder
-	sagaName string
-}
-
-// wrapExecute wraps a step Execute call with timing and recording.
-func (h *metricsHook) wrapExecute(ctx context.Context, step Step, data any) error {
-	start := time.Now()
-	err := step.Execute(ctx, data)
-	duration := time.Since(start)
-
-	result := "success"
-	if err != nil {
-		result = "failure"
-	}
-	h.recorder.RecordStepExecution(ctx, h.sagaName, step.Name(), result, duration)
-
-	return err
-}
-
-// wrapCompensate wraps a step Compensate call with timing and recording.
-func (h *metricsHook) wrapCompensate(ctx context.Context, step Step, data any) error {
-	start := time.Now()
-	err := step.Compensate(ctx, data)
-	duration := time.Since(start)
-
-	result := "success"
-	if err != nil {
-		result = "failure"
-	}
-	h.recorder.RecordCompensation(ctx, h.sagaName, step.Name(), result, duration)
-
-	return err
-}

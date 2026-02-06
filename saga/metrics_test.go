@@ -180,7 +180,7 @@ func TestSagaWithMetrics_ConcurrentExecutions(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		go func(id int) {
 			s := createSaga()
-			s.Execute(ctx, "saga-"+string(rune('0'+id)), "data")
+			_ = s.Execute(ctx, "saga-"+string(rune('0'+id)), "data")
 			done <- true
 		}(i)
 	}

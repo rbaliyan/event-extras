@@ -238,7 +238,7 @@ func TestSaga(t *testing.T) {
 		s := New("test-saga", step)
 
 		testData := map[string]string{"key": "value"}
-		s.Execute(ctx, "saga-1", testData)
+		_ = s.Execute(ctx, "saga-1", testData)
 
 		if receivedData == nil {
 			t.Fatal("data should be passed to step")
@@ -302,7 +302,9 @@ func TestMemoryStore(t *testing.T) {
 		store := NewMemoryStore()
 
 		state := &State{ID: "saga-1", Name: "test", Status: StatusRunning}
-		store.Create(ctx, state)
+		if err := store.Create(ctx, state); err != nil {
+			t.Fatalf("first Create failed: %v", err)
+		}
 
 		err := store.Create(ctx, state)
 		if err == nil {
@@ -323,7 +325,9 @@ func TestMemoryStore(t *testing.T) {
 		store := NewMemoryStore()
 
 		state := &State{ID: "saga-1", Name: "test", Status: StatusRunning}
-		store.Create(ctx, state)
+		if err := store.Create(ctx, state); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
 
 		state.Status = StatusCompleted
 		state.CompletedSteps = []string{"step-1", "step-2"}
@@ -355,9 +359,9 @@ func TestMemoryStore(t *testing.T) {
 	t.Run("List with empty filter returns all", func(t *testing.T) {
 		store := NewMemoryStore()
 
-		store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
-		store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
-		store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
+		_ = store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
 
 		results, err := store.List(ctx, StoreFilter{})
 		if err != nil {
@@ -372,9 +376,9 @@ func TestMemoryStore(t *testing.T) {
 	t.Run("List with name filter", func(t *testing.T) {
 		store := NewMemoryStore()
 
-		store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
-		store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
-		store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
+		_ = store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
 
 		results, err := store.List(ctx, StoreFilter{Name: "order"})
 		if err != nil {
@@ -389,9 +393,9 @@ func TestMemoryStore(t *testing.T) {
 	t.Run("List with status filter", func(t *testing.T) {
 		store := NewMemoryStore()
 
-		store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
-		store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
-		store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-1", Name: "order", Status: StatusCompleted})
+		_ = store.Create(ctx, &State{ID: "saga-2", Name: "order", Status: StatusFailed})
+		_ = store.Create(ctx, &State{ID: "saga-3", Name: "payment", Status: StatusCompleted})
 
 		results, err := store.List(ctx, StoreFilter{
 			Status: []Status{StatusFailed},
@@ -412,7 +416,7 @@ func TestMemoryStore(t *testing.T) {
 		store := NewMemoryStore()
 
 		for i := 0; i < 10; i++ {
-			store.Create(ctx, &State{ID: "saga-" + string(rune('0'+i)), Name: "test", Status: StatusCompleted})
+			_ = store.Create(ctx, &State{ID: "saga-" + string(rune('0'+i)), Name: "test", Status: StatusCompleted})
 		}
 
 		results, err := store.List(ctx, StoreFilter{Limit: 3})
@@ -434,7 +438,7 @@ func TestMemoryStore(t *testing.T) {
 
 			go func(id int) {
 				defer wg.Done()
-				store.Create(ctx, &State{
+				_ = store.Create(ctx, &State{
 					ID:     "saga-concurrent-" + string(rune('a'+id%26)),
 					Name:   "test",
 					Status: StatusRunning,
@@ -443,12 +447,12 @@ func TestMemoryStore(t *testing.T) {
 
 			go func() {
 				defer wg.Done()
-				store.Get(ctx, "saga-concurrent-a")
+				_, _ = store.Get(ctx, "saga-concurrent-a")
 			}()
 
 			go func() {
 				defer wg.Done()
-				store.List(ctx, StoreFilter{})
+				_, _ = store.List(ctx, StoreFilter{})
 			}()
 		}
 
@@ -510,7 +514,7 @@ func TestConcurrentExecute(t *testing.T) {
 			go func(id int) {
 				defer wg.Done()
 				sagaID := fmt.Sprintf("saga-%d", id)
-				s.Execute(ctx, sagaID, nil)
+				_ = s.Execute(ctx, sagaID, nil)
 			}(i)
 		}
 		wg.Wait()
@@ -575,7 +579,7 @@ func TestResume(t *testing.T) {
 
 	t.Run("Resume non-failed saga returns error", func(t *testing.T) {
 		store := NewMemoryStore()
-		store.Create(ctx, &State{
+		_ = store.Create(ctx, &State{
 			ID:     "saga-1",
 			Name:   "test-saga",
 			Status: StatusCompleted,

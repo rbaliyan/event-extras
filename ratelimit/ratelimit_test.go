@@ -168,6 +168,6 @@ func BenchmarkTokenBucketWait(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		limiter.Wait(ctx)
+		_ = limiter.Wait(ctx)
 	}
 }

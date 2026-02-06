@@ -342,8 +342,9 @@ func New(name string, steps ...Step) *Saga {
 		panic("at least one step is required")
 	}
 	return &Saga{
-		name:  name,
-		steps: steps,
+		name:   name,
+		steps:  steps,
+		logger: slog.Default().With("saga", name),
 	}
 }
 
@@ -382,12 +383,8 @@ func (s *Saga) WithLogger(logger *slog.Logger) *Saga {
 	return s
 }
 
-// log returns the configured logger, falling back to slog.Default().
+// log returns the configured logger.
 func (s *Saga) log() *slog.Logger {
-	if s.logger != nil {
-		return s.logger
-	}
-	s.logger = slog.Default().With("saga", s.name)
 	return s.logger
 }
 
@@ -611,9 +608,13 @@ func (s *Saga) runSteps(ctx context.Context, id string, state *State, sagaStart 
 				select {
 				case <-ctx.Done():
 					err = ctx.Err()
-					break
 				case <-time.After(backoffDelay):
 					// Continue with retry
+				}
+
+				// If context was cancelled during backoff, stop retrying
+				if ctx.Err() != nil {
+					break
 				}
 			}
 

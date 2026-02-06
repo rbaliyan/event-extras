@@ -2,6 +2,8 @@ module github.com/rbaliyan/event-extras
 
 go 1.24.0
 
+toolchain go1.24.13
+
 require (
 	github.com/lib/pq v1.11.1
 	github.com/rbaliyan/event/v3 v3.7.11
