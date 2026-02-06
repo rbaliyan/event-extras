@@ -22,6 +22,13 @@ func NewMemoryStore() *MemoryStore {
 
 // Create creates a new saga instance
 func (s *MemoryStore) Create(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -53,6 +60,13 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (*State, error) {
 
 // Update updates saga state
 func (s *MemoryStore) Update(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

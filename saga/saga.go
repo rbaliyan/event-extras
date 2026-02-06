@@ -119,6 +119,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/rbaliyan/event/v3/backoff"
 )
 
 // Step represents a single step in a saga.
@@ -269,19 +271,11 @@ type StoreFilter struct {
 	Limit  int      // Maximum results (0 = no limit)
 }
 
-// BackoffStrategy defines a backoff strategy for retry logic.
+// BackoffStrategy is an alias for backoff.Strategy from the main event library.
+// All implementations from github.com/rbaliyan/event/v3/backoff can be used directly.
 //
 // Implementations must be stateless and safe for concurrent use.
-// The NextDelay method receives the attempt number, so implementations
-// should compute the delay purely from the attempt parameter without
-// maintaining internal state.
-type BackoffStrategy interface {
-	// NextDelay returns the delay for the given attempt (0-indexed).
-	// Attempt 0 is the first retry, not the initial attempt.
-	// This method must be safe for concurrent use and should not
-	// rely on or modify any internal state.
-	NextDelay(attempt int) time.Duration
-}
+type BackoffStrategy = backoff.Strategy
 
 // Saga orchestrates a sequence of steps with compensation.
 //
