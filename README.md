@@ -3,6 +3,9 @@
 [![CI](https://github.com/rbaliyan/event-extras/actions/workflows/ci.yml/badge.svg)](https://github.com/rbaliyan/event-extras/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rbaliyan/event-extras.svg)](https://pkg.go.dev/github.com/rbaliyan/event-extras)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rbaliyan/event-extras)](https://goreportcard.com/report/github.com/rbaliyan/event-extras)
+[![Release](https://img.shields.io/github/v/release/rbaliyan/event-extras)](https://github.com/rbaliyan/event-extras/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/rbaliyan/event-extras/badge)](https://scorecard.dev/viewer/?uri=github.com/rbaliyan/event-extras)
 
 Extended functionality packages for the [event](https://github.com/rbaliyan/event) library.
 
