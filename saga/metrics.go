@@ -30,9 +30,9 @@ type MetricsRecorder struct {
 	meter     metric.Meter
 
 	// Counters
-	sagaExecutions     metric.Int64Counter
-	stepExecutions     metric.Int64Counter
-	compensationSteps  metric.Int64Counter
+	sagaExecutions    metric.Int64Counter
+	stepExecutions    metric.Int64Counter
+	compensationSteps metric.Int64Counter
 
 	// Histograms
 	sagaDuration metric.Float64Histogram
@@ -202,4 +202,3 @@ func (m *MetricsRecorder) RecordCompensation(ctx context.Context, sagaName, step
 	m.compensationSteps.Add(ctx, 1, attrs)
 	m.stepDuration.Record(ctx, duration.Seconds(), attrs)
 }
-

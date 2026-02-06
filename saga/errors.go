@@ -1,6 +1,6 @@
 // Package saga provides saga pattern implementation for distributed transactions.
 //
-// Error Handling
+// # Error Handling
 //
 // This package uses shared error types from github.com/rbaliyan/event/v3/errors
 // for consistent error handling across the event ecosystem.

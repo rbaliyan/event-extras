@@ -526,9 +526,9 @@ func (s *RedisStore) Health(ctx context.Context) *health.Result {
 		Latency:   time.Since(start),
 		CheckedAt: start,
 		Details: map[string]any{
-			"total_sagas":       count,
-			"pending_sagas":     pending,
-			"running_sagas":     running,
+			"total_sagas":        count,
+			"pending_sagas":      pending,
+			"running_sagas":      running,
 			"compensating_sagas": compensating,
 		},
 	}

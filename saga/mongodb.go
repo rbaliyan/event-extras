@@ -252,7 +252,7 @@ func (s *MongoStore) List(ctx context.Context, filter StoreFilter) ([]*State, er
 	if err != nil {
 		return nil, fmt.Errorf("find: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var results []*State
 	for cursor.Next(ctx) {
@@ -389,7 +389,7 @@ func (s *MongoStore) GetStats(ctx context.Context) (*Stats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("aggregate by name: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	for cursor.Next(ctx) {
 		var result struct {

@@ -11,12 +11,12 @@ import (
 
 // mockStep is a test step implementation
 type mockStep struct {
-	name           string
-	executeCalled  bool
+	name             string
+	executeCalled    bool
 	compensateCalled bool
-	executeErr     error
-	compensateErr  error
-	mu             sync.Mutex
+	executeErr       error
+	compensateErr    error
+	mu               sync.Mutex
 }
 
 func newMockStep(name string) *mockStep {
