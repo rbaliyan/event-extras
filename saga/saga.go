@@ -334,7 +334,13 @@ type Saga struct {
 //	    &ReserveInventoryStep{inventoryService},
 //	    &ProcessPaymentStep{paymentService},
 //	)
+//
+// Panics if name is empty or no steps are provided (programming error).
 func New(name string, steps ...Step) *Saga {
+	eventerrors.RequireNotEmpty(name, "name")
+	if len(steps) == 0 {
+		panic("at least one step is required")
+	}
 	return &Saga{
 		name:  name,
 		steps: steps,
