@@ -178,6 +178,7 @@ type Step interface {
 //   - The saga data being processed
 //   - Any error that occurred
 //   - Timing information
+//   - Version for optimistic locking
 //
 // State is persisted to the Store after each step for recovery.
 type State struct {
@@ -191,7 +192,12 @@ type State struct {
 	StartedAt      time.Time  // When saga started
 	CompletedAt    *time.Time // When saga completed/failed (nil if running)
 	LastUpdatedAt  time.Time  // Last state update
+	Version        int64      // Version for optimistic locking (incremented on each update)
 }
+
+// ErrVersionConflict is returned when an update fails due to a version mismatch.
+// This indicates that another process has modified the saga state since it was read.
+var ErrVersionConflict = fmt.Errorf("saga version conflict: state was modified by another process")
 
 // Status represents saga status.
 //
@@ -490,11 +496,43 @@ func (s *Saga) Steps() []Step {
 //	    // Compensations have already run - order is in consistent state
 //	}
 func (s *Saga) Execute(ctx context.Context, id string, data any) error {
-	return s.execute(ctx, id, data, false)
+	return s.execute(ctx, id, data)
 }
 
-// execute is the internal execution method shared by Execute and Resume.
-func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) error {
+// executeWithVersion is used for resuming a saga with existing version for optimistic locking.
+func (s *Saga) executeWithVersion(ctx context.Context, id string, data any, version int64) error {
+	sagaStart := time.Now()
+
+	// Record saga start if metrics enabled
+	if s.metrics != nil {
+		s.metrics.RecordSagaStart(ctx, s.name)
+	}
+
+	state := &State{
+		ID:            id,
+		Name:          s.name,
+		Status:        StatusRunning,
+		Data:          data,
+		StartedAt:     sagaStart,
+		LastUpdatedAt: sagaStart,
+		Version:       version,
+	}
+
+	// Persist initial state - update existing record when resuming
+	if s.store != nil {
+		if err := s.store.Update(ctx, state); err != nil {
+			if s.metrics != nil {
+				s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
+			}
+			return fmt.Errorf("update saga state for resume: %w", err)
+		}
+	}
+
+	return s.runSteps(ctx, id, state, sagaStart)
+}
+
+// execute is the internal execution method for new saga executions.
+func (s *Saga) execute(ctx context.Context, id string, data any) error {
 	sagaStart := time.Now()
 
 	// Record saga start if metrics enabled
@@ -513,22 +551,20 @@ func (s *Saga) execute(ctx context.Context, id string, data any, resume bool) er
 
 	// Persist initial state
 	if s.store != nil {
-		if resume {
-			if err := s.store.Update(ctx, state); err != nil {
-				if s.metrics != nil {
-					s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
-				}
-				return fmt.Errorf("update saga state for resume: %w", err)
+		if err := s.store.Create(ctx, state); err != nil {
+			if s.metrics != nil {
+				s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
 			}
-		} else {
-			if err := s.store.Create(ctx, state); err != nil {
-				if s.metrics != nil {
-					s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
-				}
-				return fmt.Errorf("create saga state: %w", err)
-			}
+			return fmt.Errorf("create saga state: %w", err)
 		}
 	}
+
+	return s.runSteps(ctx, id, state, sagaStart)
+}
+
+// runSteps executes the saga steps and handles compensation on failure.
+func (s *Saga) runSteps(ctx context.Context, id string, state *State, sagaStart time.Time) error {
+	data := state.Data
 
 	completedSteps := make([]Step, 0, len(s.steps))
 
@@ -759,5 +795,123 @@ func (s *Saga) Resume(ctx context.Context, id string) error {
 		return fmt.Errorf("saga is not in failed state: %s", state.Status)
 	}
 
-	return s.execute(ctx, id, state.Data, true)
+	return s.executeWithVersion(ctx, id, state.Data, state.Version)
 }
+
+// TypedStep is a generic wrapper that provides type-safe Execute and Compensate methods.
+//
+// TypedStep allows you to write saga steps with compile-time type checking for the
+// data parameter, eliminating the need for type assertions in your step implementations.
+//
+// Example:
+//
+//	type OrderData struct {
+//	    OrderID    string
+//	    CustomerID string
+//	    Total      float64
+//	}
+//
+//	// Define typed handler functions
+//	reserveInventory := func(ctx context.Context, order *OrderData) error {
+//	    return inventoryService.Reserve(ctx, order.OrderID)
+//	}
+//	releaseInventory := func(ctx context.Context, order *OrderData) error {
+//	    return inventoryService.Release(ctx, order.OrderID)
+//	}
+//
+//	// Create typed step
+//	step := saga.NewTypedStep("reserve-inventory", reserveInventory, releaseInventory)
+//
+//	// Use in saga
+//	orderSaga := saga.New("order-creation", step)
+//	orderSaga.Execute(ctx, sagaID, &OrderData{OrderID: "123"})
+type TypedStep[T any] struct {
+	name       string
+	execute    func(ctx context.Context, data T) error
+	compensate func(ctx context.Context, data T) error
+}
+
+// NewTypedStep creates a new type-safe saga step.
+//
+// The execute and compensate functions receive the data parameter with the correct type,
+// eliminating the need for manual type assertions.
+//
+// Parameters:
+//   - name: Step name for identification in logs and state tracking
+//   - execute: The forward action to perform (receives typed data)
+//   - compensate: The reverse action to undo execute (receives typed data)
+//
+// Example:
+//
+//	step := saga.NewTypedStep("process-payment",
+//	    func(ctx context.Context, order *Order) error {
+//	        return paymentService.Charge(ctx, order.CustomerID, order.Total)
+//	    },
+//	    func(ctx context.Context, order *Order) error {
+//	        return paymentService.Refund(ctx, order.CustomerID, order.Total)
+//	    },
+//	)
+func NewTypedStep[T any](name string, execute, compensate func(ctx context.Context, data T) error) *TypedStep[T] {
+	return &TypedStep[T]{
+		name:       name,
+		execute:    execute,
+		compensate: compensate,
+	}
+}
+
+// Name returns the step name.
+func (s *TypedStep[T]) Name() string {
+	return s.name
+}
+
+// Execute performs the step action with type-safe data conversion.
+//
+// If the data cannot be converted to type T, an error is returned.
+// The data must be either of type T or *T.
+func (s *TypedStep[T]) Execute(ctx context.Context, data any) error {
+	typed, err := convertToType[T](data)
+	if err != nil {
+		return fmt.Errorf("step %s: %w", s.name, err)
+	}
+	return s.execute(ctx, typed)
+}
+
+// Compensate undoes the step action with type-safe data conversion.
+//
+// If the data cannot be converted to type T, an error is returned.
+// The data must be either of type T or *T.
+func (s *TypedStep[T]) Compensate(ctx context.Context, data any) error {
+	typed, err := convertToType[T](data)
+	if err != nil {
+		return fmt.Errorf("step %s compensate: %w", s.name, err)
+	}
+	return s.compensate(ctx, typed)
+}
+
+// convertToType attempts to convert data to type T.
+// Handles both value and pointer types, as well as map[string]any from JSON deserialization.
+func convertToType[T any](data any) (T, error) {
+	var zero T
+
+	if data == nil {
+		return zero, fmt.Errorf("data is nil")
+	}
+
+	// Direct type match
+	if typed, ok := data.(T); ok {
+		return typed, nil
+	}
+
+	// Handle pointer to T
+	if typed, ok := data.(*T); ok {
+		if typed == nil {
+			return zero, fmt.Errorf("data pointer is nil")
+		}
+		return *typed, nil
+	}
+
+	return zero, fmt.Errorf("cannot convert %T to %T", data, zero)
+}
+
+// Compile-time check that TypedStep implements Step
+var _ Step = (*TypedStep[any])(nil)

@@ -22,7 +22,8 @@ CREATE TABLE sagas (
     error           TEXT,
     started_at      TIMESTAMP NOT NULL,
     completed_at    TIMESTAMP,
-    last_updated_at TIMESTAMP NOT NULL
+    last_updated_at TIMESTAMP NOT NULL,
+    version         BIGINT NOT NULL DEFAULT 0
 );
 
 CREATE INDEX idx_sagas_name ON sagas(name);
@@ -52,14 +53,21 @@ func (s *PostgresStore) WithTable(table string) *PostgresStore {
 
 // Create creates a new saga instance
 func (s *PostgresStore) Create(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	data, err := json.Marshal(state.Data)
 	if err != nil {
 		return fmt.Errorf("marshal data: %w", err)
 	}
 
 	query := fmt.Sprintf(`
-		INSERT INTO %s (id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO %s (id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`, s.table)
 
 	_, err = s.db.ExecContext(ctx, query,
@@ -73,6 +81,7 @@ func (s *PostgresStore) Create(ctx context.Context, state *State) error {
 		state.StartedAt,
 		state.CompletedAt,
 		state.LastUpdatedAt,
+		state.Version,
 	)
 
 	if err != nil {
@@ -85,7 +94,7 @@ func (s *PostgresStore) Create(ctx context.Context, state *State) error {
 // Get retrieves saga state by ID
 func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 	query := fmt.Sprintf(`
-		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at
+		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version
 		FROM %s
 		WHERE id = $1
 	`, s.table)
@@ -107,6 +116,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 		&state.StartedAt,
 		&completedAt,
 		&state.LastUpdatedAt,
+		&state.Version,
 	)
 
 	if err == sql.ErrNoRows {
@@ -135,17 +145,31 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 	return &state, nil
 }
 
-// Update updates saga state
+// Update updates saga state with optimistic locking.
+//
+// The update uses the Version field for optimistic locking. If the version
+// in PostgreSQL doesn't match the expected version, ErrVersionConflict is returned.
+// On successful update, the state's Version is incremented.
 func (s *PostgresStore) Update(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	data, err := json.Marshal(state.Data)
 	if err != nil {
 		return fmt.Errorf("marshal data: %w", err)
 	}
 
+	newVersion := state.Version + 1
+
+	// Use optimistic locking: only update if version matches
 	query := fmt.Sprintf(`
 		UPDATE %s
-		SET status = $1, current_step = $2, completed_steps = $3, data = $4, error = $5, completed_at = $6, last_updated_at = $7
-		WHERE id = $8
+		SET status = $1, current_step = $2, completed_steps = $3, data = $4, error = $5, completed_at = $6, last_updated_at = $7, version = $8
+		WHERE id = $9 AND version = $10
 	`, s.table)
 
 	result, err := s.db.ExecContext(ctx, query,
@@ -156,7 +180,9 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 		state.Error,
 		state.CompletedAt,
 		state.LastUpdatedAt,
+		newVersion,
 		state.ID,
+		state.Version,
 	)
 
 	if err != nil {
@@ -165,21 +191,30 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
+		// Check if saga exists to distinguish between not found and version conflict
+		var exists bool
+		checkQuery := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE id = $1)", s.table)
+		_ = s.db.QueryRowContext(ctx, checkQuery, state.ID).Scan(&exists)
+		if exists {
+			return ErrVersionConflict
+		}
 		return fmt.Errorf("saga not found: %s", state.ID)
 	}
 
+	// Update local version on success
+	state.Version = newVersion
 	return nil
 }
 
 // List lists sagas matching the filter
 func (s *PostgresStore) List(ctx context.Context, filter StoreFilter) ([]*State, error) {
 	query := fmt.Sprintf(`
-		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at
+		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version
 		FROM %s
 		WHERE 1=1
 	`, s.table)
 
-	var args []interface{}
+	var args []any
 	argIndex := 1
 
 	if filter.Name != "" {
@@ -230,6 +265,7 @@ func (s *PostgresStore) List(ctx context.Context, filter StoreFilter) ([]*State,
 			&state.StartedAt,
 			&completedAt,
 			&state.LastUpdatedAt,
+			&state.Version,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan: %w", err)

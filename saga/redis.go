@@ -113,6 +113,13 @@ func (s *RedisStore) WithTTL(ttl time.Duration) *RedisStore {
 
 // Create creates a new saga instance
 func (s *RedisStore) Create(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	key := s.prefix + state.ID
 
 	// Atomic existence check using HSetNX on the id field
@@ -151,7 +158,7 @@ func (s *RedisStore) saveState(ctx context.Context, key string, state *State) er
 	completedSteps, _ := json.Marshal(state.CompletedSteps)
 	data, _ := json.Marshal(state.Data)
 
-	fields := map[string]interface{}{
+	fields := map[string]any{
 		"id":              state.ID,
 		"name":            state.Name,
 		"status":          string(state.Status),
@@ -161,6 +168,7 @@ func (s *RedisStore) saveState(ctx context.Context, key string, state *State) er
 		"error":           state.Error,
 		"started_at":      state.StartedAt.Unix(),
 		"last_updated_at": state.LastUpdatedAt.Unix(),
+		"version":         state.Version,
 	}
 
 	if state.CompletedAt != nil {
@@ -244,12 +252,55 @@ func (s *RedisStore) parseState(fields map[string]string) (*State, error) {
 		state.LastUpdatedAt = time.Unix(unix, 0)
 	}
 
+	if v := fields["version"]; v != "" {
+		version, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse version: %w", err)
+		}
+		state.Version = version
+	}
+
 	return state, nil
 }
 
-// Update updates saga state
+// updateScript is a Lua script for atomic compare-and-swap update with version checking.
+// Returns: 0 = success, 1 = version conflict, 2 = not found
+var updateScript = redis.NewScript(`
+local key = KEYS[1]
+local expected_version = tonumber(ARGV[1])
+local new_version = tonumber(ARGV[2])
+
+-- Check if key exists
+local current_version = redis.call('HGET', key, 'version')
+if current_version == false then
+    return 2  -- not found
+end
+
+-- Check version
+if tonumber(current_version) ~= expected_version then
+    return 1  -- version conflict
+end
+
+-- Update version field
+redis.call('HSET', key, 'version', new_version)
+return 0  -- success
+`)
+
+// Update updates saga state with optimistic locking.
+//
+// The update uses the Version field for optimistic locking. If the version
+// in Redis doesn't match the expected version, ErrVersionConflict is returned.
+// On successful update, the state's Version is incremented.
 func (s *RedisStore) Update(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	key := s.prefix + state.ID
+	newVersion := state.Version + 1
 
 	// Get old status for index update
 	oldStatus, err := s.client.HGet(ctx, key, "status").Result()
@@ -257,7 +308,23 @@ func (s *RedisStore) Update(ctx context.Context, state *State) error {
 		return fmt.Errorf("hget: %w", err)
 	}
 
-	// Save new state
+	// Use Lua script for atomic version check
+	result, err := updateScript.Run(ctx, s.client, []string{key}, state.Version, newVersion).Int()
+	if err != nil {
+		return fmt.Errorf("version check: %w", err)
+	}
+
+	switch result {
+	case 1:
+		return ErrVersionConflict
+	case 2:
+		return fmt.Errorf("saga not found: %s", state.ID)
+	}
+
+	// Update the version in state for subsequent saves
+	state.Version = newVersion
+
+	// Save new state (version already updated by script)
 	if err := s.saveState(ctx, key, state); err != nil {
 		return err
 	}

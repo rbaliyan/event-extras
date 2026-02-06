@@ -58,7 +58,11 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (*State, error) {
 	return &result, nil
 }
 
-// Update updates saga state
+// Update updates saga state with optimistic locking.
+//
+// The update uses the Version field for optimistic locking. If the version
+// doesn't match the expected version, ErrVersionConflict is returned.
+// On successful update, the state's Version is incremented.
 func (s *MemoryStore) Update(ctx context.Context, state *State) error {
 	if state == nil {
 		return fmt.Errorf("state is nil")
@@ -70,9 +74,18 @@ func (s *MemoryStore) Update(ctx context.Context, state *State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.sagas[state.ID]; !exists {
+	existing, exists := s.sagas[state.ID]
+	if !exists {
 		return fmt.Errorf("saga not found: %s", state.ID)
 	}
+
+	// Check version for optimistic locking
+	if existing.Version != state.Version {
+		return ErrVersionConflict
+	}
+
+	// Increment version
+	state.Version++
 
 	// Make a copy
 	stored := *state

@@ -48,6 +48,7 @@ type MongoState struct {
 	StartedAt      time.Time  `bson:"started_at"`
 	CompletedAt    *time.Time `bson:"completed_at,omitempty"`
 	LastUpdatedAt  time.Time  `bson:"last_updated_at"`
+	Version        int64      `bson:"version"`
 }
 
 // ToState converts MongoState to State
@@ -63,6 +64,7 @@ func (m *MongoState) ToState() *State {
 		StartedAt:      m.StartedAt,
 		CompletedAt:    m.CompletedAt,
 		LastUpdatedAt:  m.LastUpdatedAt,
+		Version:        m.Version,
 	}
 }
 
@@ -79,6 +81,7 @@ func FromState(s *State) *MongoState {
 		StartedAt:      s.StartedAt,
 		CompletedAt:    s.CompletedAt,
 		LastUpdatedAt:  s.LastUpdatedAt,
+		Version:        s.Version,
 	}
 }
 
@@ -140,6 +143,13 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 
 // Create creates a new saga instance
 func (s *MongoStore) Create(ctx context.Context, state *State) error {
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
 	mongoState := FromState(state)
 
 	_, err := s.collection.InsertOne(ctx, mongoState)
@@ -169,9 +179,25 @@ func (s *MongoStore) Get(ctx context.Context, id string) (*State, error) {
 	return mongoState.ToState(), nil
 }
 
-// Update updates saga state
+// Update updates saga state with optimistic locking.
+//
+// The update uses the Version field for optimistic locking. If the version
+// in the database doesn't match the expected version, ErrVersionConflict is returned.
+// On successful update, the state's Version is incremented.
 func (s *MongoStore) Update(ctx context.Context, state *State) error {
-	filter := bson.M{"_id": state.ID}
+	if state == nil {
+		return fmt.Errorf("state is nil")
+	}
+	if state.ID == "" {
+		return fmt.Errorf("state ID is required")
+	}
+
+	// Use optimistic locking: only update if version matches
+	filter := bson.M{
+		"_id":     state.ID,
+		"version": state.Version,
+	}
+	newVersion := state.Version + 1
 	update := bson.M{
 		"$set": bson.M{
 			"status":          state.Status,
@@ -181,6 +207,7 @@ func (s *MongoStore) Update(ctx context.Context, state *State) error {
 			"error":           state.Error,
 			"completed_at":    state.CompletedAt,
 			"last_updated_at": state.LastUpdatedAt,
+			"version":         newVersion,
 		},
 	}
 
@@ -190,9 +217,16 @@ func (s *MongoStore) Update(ctx context.Context, state *State) error {
 	}
 
 	if result.MatchedCount == 0 {
+		// Check if saga exists to distinguish between not found and version conflict
+		exists, _ := s.collection.CountDocuments(ctx, bson.M{"_id": state.ID})
+		if exists > 0 {
+			return ErrVersionConflict
+		}
 		return fmt.Errorf("saga not found: %s", state.ID)
 	}
 
+	// Update local version on success
+	state.Version = newVersion
 	return nil
 }
 
