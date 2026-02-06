@@ -1,5 +1,9 @@
 # Event Extras
 
+[![CI](https://github.com/rbaliyan/event-extras/actions/workflows/ci.yml/badge.svg)](https://github.com/rbaliyan/event-extras/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rbaliyan/event-extras.svg)](https://pkg.go.dev/github.com/rbaliyan/event-extras)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rbaliyan/event-extras)](https://goreportcard.com/report/github.com/rbaliyan/event-extras)
+
 Extended functionality packages for the [event](https://github.com/rbaliyan/event) library.
 
 ## Installation
