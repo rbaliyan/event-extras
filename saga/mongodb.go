@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rbaliyan/event/v3/health"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -416,5 +417,52 @@ func (s *MongoStore) GetStats(ctx context.Context) (*Stats, error) {
 	return stats, nil
 }
 
-// Compile-time check
-var _ Store = (*MongoStore)(nil)
+// Health performs a health check on the MongoDB saga store.
+func (s *MongoStore) Health(ctx context.Context) *health.Result {
+	start := time.Now()
+
+	// Ping MongoDB
+	if err := s.collection.Database().Client().Ping(ctx, nil); err != nil {
+		return &health.Result{
+			Status:    health.StatusUnhealthy,
+			Message:   fmt.Sprintf("mongodb ping failed: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count total sagas
+	count, err := s.collection.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return &health.Result{
+			Status:    health.StatusDegraded,
+			Message:   fmt.Sprintf("failed to count sagas: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count by status
+	pending, _ := s.collection.CountDocuments(ctx, bson.M{"status": StatusPending})
+	running, _ := s.collection.CountDocuments(ctx, bson.M{"status": StatusRunning})
+	compensating, _ := s.collection.CountDocuments(ctx, bson.M{"status": StatusCompensating})
+
+	return &health.Result{
+		Status:    health.StatusHealthy,
+		Latency:   time.Since(start),
+		CheckedAt: start,
+		Details: map[string]any{
+			"total_sagas":        count,
+			"pending_sagas":      pending,
+			"running_sagas":      running,
+			"compensating_sagas": compensating,
+			"collection":         s.collection.Name(),
+		},
+	}
+}
+
+// Compile-time checks
+var (
+	_ Store          = (*MongoStore)(nil)
+	_ health.Checker = (*MongoStore)(nil)
+)

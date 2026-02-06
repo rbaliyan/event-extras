@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/rbaliyan/event/v3/health"
 )
 
 /*
@@ -305,5 +307,55 @@ func (s *PostgresStore) DeleteOlderThan(ctx context.Context, age time.Duration) 
 	return result.RowsAffected()
 }
 
-// Compile-time check
-var _ Store = (*PostgresStore)(nil)
+// Health performs a health check on the PostgreSQL saga store.
+func (s *PostgresStore) Health(ctx context.Context) *health.Result {
+	start := time.Now()
+
+	// Ping PostgreSQL
+	if err := s.db.PingContext(ctx); err != nil {
+		return &health.Result{
+			Status:    health.StatusUnhealthy,
+			Message:   fmt.Sprintf("postgres ping failed: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count total sagas
+	var count int64
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table)
+	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+		return &health.Result{
+			Status:    health.StatusDegraded,
+			Message:   fmt.Sprintf("failed to count sagas: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count by status
+	var pending, running, compensating int64
+	pendingQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE status = $1", s.table)
+	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusPending).Scan(&pending)
+	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusRunning).Scan(&running)
+	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusCompensating).Scan(&compensating)
+
+	return &health.Result{
+		Status:    health.StatusHealthy,
+		Latency:   time.Since(start),
+		CheckedAt: start,
+		Details: map[string]any{
+			"total_sagas":        count,
+			"pending_sagas":      pending,
+			"running_sagas":      running,
+			"compensating_sagas": compensating,
+			"table":              s.table,
+		},
+	}
+}
+
+// Compile-time checks
+var (
+	_ Store          = (*PostgresStore)(nil)
+	_ health.Checker = (*PostgresStore)(nil)
+)

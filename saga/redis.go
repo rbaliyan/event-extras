@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rbaliyan/event/v3/health"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -490,5 +491,51 @@ func (s *RedisStore) CountByName(ctx context.Context, name string) (int64, error
 	return s.client.SCard(ctx, s.namePrefix+name).Result()
 }
 
-// Compile-time check
-var _ Store = (*RedisStore)(nil)
+// Health performs a health check on the Redis saga store.
+func (s *RedisStore) Health(ctx context.Context) *health.Result {
+	start := time.Now()
+
+	// Ping Redis
+	if err := s.client.Ping(ctx).Err(); err != nil {
+		return &health.Result{
+			Status:    health.StatusUnhealthy,
+			Message:   fmt.Sprintf("redis ping failed: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count total sagas
+	count, err := s.Count(ctx)
+	if err != nil {
+		return &health.Result{
+			Status:    health.StatusDegraded,
+			Message:   fmt.Sprintf("failed to count sagas: %v", err),
+			Latency:   time.Since(start),
+			CheckedAt: start,
+		}
+	}
+
+	// Count pending/running sagas
+	pending, _ := s.CountByStatus(ctx, StatusPending)
+	running, _ := s.CountByStatus(ctx, StatusRunning)
+	compensating, _ := s.CountByStatus(ctx, StatusCompensating)
+
+	return &health.Result{
+		Status:    health.StatusHealthy,
+		Latency:   time.Since(start),
+		CheckedAt: start,
+		Details: map[string]any{
+			"total_sagas":       count,
+			"pending_sagas":     pending,
+			"running_sagas":     running,
+			"compensating_sagas": compensating,
+		},
+	}
+}
+
+// Compile-time checks
+var (
+	_ Store          = (*RedisStore)(nil)
+	_ health.Checker = (*RedisStore)(nil)
+)

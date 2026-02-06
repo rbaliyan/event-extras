@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/rbaliyan/event/v3/health"
 )
 
 // MemoryStore is an in-memory saga store for testing
@@ -148,5 +150,24 @@ func (s *MemoryStore) Cleanup(age time.Duration) int {
 	return deleted
 }
 
-// Compile-time check
-var _ Store = (*MemoryStore)(nil)
+// Health performs a health check on the memory store.
+// Always returns healthy since in-memory stores don't have connectivity issues.
+func (s *MemoryStore) Health(ctx context.Context) *health.Result {
+	s.mu.RLock()
+	count := len(s.sagas)
+	s.mu.RUnlock()
+
+	return &health.Result{
+		Status:    health.StatusHealthy,
+		CheckedAt: time.Now(),
+		Details: map[string]any{
+			"sagas_count": count,
+		},
+	}
+}
+
+// Compile-time checks
+var (
+	_ Store          = (*MemoryStore)(nil)
+	_ health.Checker = (*MemoryStore)(nil)
+)
