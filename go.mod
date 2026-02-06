@@ -2,6 +2,8 @@ module github.com/rbaliyan/event-extras
 
 go 1.24.0
 
+replace github.com/rbaliyan/event/v3 => ../event
+
 require (
 	github.com/rbaliyan/event/v3 v3.7.3
 	github.com/redis/go-redis/v9 v9.17.3

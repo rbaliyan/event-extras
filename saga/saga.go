@@ -121,6 +121,7 @@ import (
 	"time"
 
 	"github.com/rbaliyan/event/v3/backoff"
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 )
 
 // Step represents a single step in a saga.
@@ -197,7 +198,14 @@ type State struct {
 
 // ErrVersionConflict is returned when an update fails due to a version mismatch.
 // This indicates that another process has modified the saga state since it was read.
-var ErrVersionConflict = fmt.Errorf("saga version conflict: state was modified by another process")
+//
+// This is an alias to the shared event errors package for ecosystem consistency.
+var ErrVersionConflict = eventerrors.ErrVersionConflict
+
+// NewVersionConflictError creates a detailed version conflict error for a saga state.
+func NewVersionConflictError(sagaID string, expected, actual int64) error {
+	return eventerrors.NewVersionConflictError("saga state", sagaID, expected, actual)
+}
 
 // Status represents saga status.
 //
