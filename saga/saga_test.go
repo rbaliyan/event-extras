@@ -83,7 +83,10 @@ func TestSaga(t *testing.T) {
 		step1 := newMockStep("step-1")
 		step2 := newMockStep("step-2")
 
-		s := New("test-saga", step1, step2)
+		s, err := New("test-saga", []Step{step1, step2})
+		if err != nil {
+			t.Fatalf("New failed: %v", err)
+		}
 
 		if s.Name() != "test-saga" {
 			t.Errorf("expected name test-saga, got %s", s.Name())
@@ -93,12 +96,26 @@ func TestSaga(t *testing.T) {
 		}
 	})
 
+	t.Run("New returns error for empty name", func(t *testing.T) {
+		_, err := New("", []Step{newMockStep("step-1")})
+		if err == nil {
+			t.Error("expected error for empty name")
+		}
+	})
+
+	t.Run("New returns error for empty steps", func(t *testing.T) {
+		_, err := New("test-saga", nil)
+		if err == nil {
+			t.Error("expected error for nil steps")
+		}
+	})
+
 	t.Run("Execute runs all steps on success", func(t *testing.T) {
 		step1 := newMockStep("step-1")
 		step2 := newMockStep("step-2")
 		step3 := newMockStep("step-3")
 
-		s := New("test-saga", step1, step2, step3)
+		s, _ := New("test-saga", []Step{step1, step2, step3})
 
 		err := s.Execute(ctx, "saga-1", nil)
 		if err != nil {
@@ -133,7 +150,7 @@ func TestSaga(t *testing.T) {
 		step3 := newMockStep("step-3")
 		step3.executeErr = errors.New("step-3 failed")
 
-		s := New("test-saga", step1, step2, step3)
+		s, _ := New("test-saga", []Step{step1, step2, step3})
 
 		err := s.Execute(ctx, "saga-1", nil)
 		if err == nil {
@@ -169,7 +186,7 @@ func TestSaga(t *testing.T) {
 		step2 := newMockStep("step-2")
 
 		store := NewMemoryStore()
-		s := New("test-saga", step1, step2).WithStore(store)
+		s, _ := New("test-saga", []Step{step1, step2}, WithStore(store))
 
 		err := s.Execute(ctx, "saga-1", "test-data")
 		if err != nil {
@@ -195,7 +212,7 @@ func TestSaga(t *testing.T) {
 		step2.executeErr = errors.New("step-2 failed")
 
 		store := NewMemoryStore()
-		s := New("test-saga", step1, step2).WithStore(store)
+		s, _ := New("test-saga", []Step{step1, step2}, WithStore(store))
 
 		err := s.Execute(ctx, "saga-1", nil)
 		if err == nil {
@@ -218,7 +235,7 @@ func TestSaga(t *testing.T) {
 		step2.executeErr = errors.New("step-2 failed")
 
 		store := NewMemoryStore()
-		s := New("test-saga", step1, step2).WithStore(store)
+		s, _ := New("test-saga", []Step{step1, step2}, WithStore(store))
 
 		err := s.Execute(ctx, "saga-1", nil)
 		if err == nil {
@@ -235,7 +252,7 @@ func TestSaga(t *testing.T) {
 		var receivedData any
 		step := &dataCapturingStep{received: &receivedData}
 
-		s := New("test-saga", step)
+		s, _ := New("test-saga", []Step{step})
 
 		testData := map[string]string{"key": "value"}
 		_ = s.Execute(ctx, "saga-1", testData)
@@ -478,9 +495,10 @@ func TestConcurrentExecute(t *testing.T) {
 		// Use a shared saga with backoff and retries
 		step1 := newMockStep("step-1")
 		step2 := newMockStep("step-2")
-		s := New("concurrent-saga", step1, step2).
-			WithBackoff(backoff).
-			WithMaxRetries(2)
+		s, _ := New("concurrent-saga", []Step{step1, step2},
+			WithBackoff(backoff),
+			WithMaxRetries(2),
+		)
 
 		var wg sync.WaitGroup
 		errs := make(chan error, 20)
@@ -506,7 +524,7 @@ func TestConcurrentExecute(t *testing.T) {
 		store := NewMemoryStore()
 		step1 := newMockStep("step-1")
 		step2 := newMockStep("step-2")
-		s := New("concurrent-store-saga", step1, step2).WithStore(store)
+		s, _ := New("concurrent-store-saga", []Step{step1, step2}, WithStore(store))
 
 		var wg sync.WaitGroup
 		for i := 0; i < 20; i++ {
@@ -547,9 +565,10 @@ func TestConcurrentExecute(t *testing.T) {
 				if id%2 == 0 {
 					step2.executeErr = errors.New("planned failure")
 				}
-				s := New("concurrent-retry-saga", step1, step2).
-					WithBackoff(backoff).
-					WithMaxRetries(1)
+				s, _ := New("concurrent-retry-saga", []Step{step1, step2},
+					WithBackoff(backoff),
+					WithMaxRetries(1),
+				)
 
 				sagaID := fmt.Sprintf("saga-%d", id)
 				err := s.Execute(ctx, sagaID, nil)
@@ -569,7 +588,7 @@ func TestResume(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("Resume without store returns error", func(t *testing.T) {
-		s := New("test-saga", newMockStep("step-1"))
+		s, _ := New("test-saga", []Step{newMockStep("step-1")})
 
 		err := s.Resume(ctx, "saga-1")
 		if err == nil {
@@ -585,7 +604,7 @@ func TestResume(t *testing.T) {
 			Status: StatusCompleted,
 		})
 
-		s := New("test-saga", newMockStep("step-1")).WithStore(store)
+		s, _ := New("test-saga", []Step{newMockStep("step-1")}, WithStore(store))
 
 		err := s.Resume(ctx, "saga-1")
 		if err == nil {
@@ -595,7 +614,7 @@ func TestResume(t *testing.T) {
 
 	t.Run("Resume non-existent saga returns error", func(t *testing.T) {
 		store := NewMemoryStore()
-		s := New("test-saga", newMockStep("step-1")).WithStore(store)
+		s, _ := New("test-saga", []Step{newMockStep("step-1")}, WithStore(store))
 
 		err := s.Resume(ctx, "non-existent")
 		if err == nil {
@@ -611,7 +630,7 @@ func TestResume(t *testing.T) {
 		failingStep.executeErr = errors.New("transient failure")
 
 		step1 := newMockStep("step-1")
-		s := New("test-saga", step1, failingStep).WithStore(store)
+		s, _ := New("test-saga", []Step{step1, failingStep}, WithStore(store))
 
 		err := s.Execute(ctx, "saga-resume", "test-data")
 		if err == nil {
@@ -626,7 +645,7 @@ func TestResume(t *testing.T) {
 		// Fix the step (clear the error) and resume
 		step2Fixed := newMockStep("step-2")
 		step1Resume := newMockStep("step-1")
-		s2 := New("test-saga", step1Resume, step2Fixed).WithStore(store)
+		s2, _ := New("test-saga", []Step{step1Resume, step2Fixed}, WithStore(store))
 
 		err = s2.Resume(ctx, "saga-resume")
 		if err != nil {
@@ -639,9 +658,9 @@ func TestResume(t *testing.T) {
 			t.Errorf("expected completed after resume, got %s", state.Status)
 		}
 
-		// Verify both steps were executed on resume
-		if !step1Resume.wasExecuted() {
-			t.Error("step-1 should have been executed on resume")
+		// Step-1 was already completed before failure, so it should be skipped on resume
+		if step1Resume.wasExecuted() {
+			t.Error("step-1 should have been skipped on resume (already completed)")
 		}
 		if !step2Fixed.wasExecuted() {
 			t.Error("step-2 should have been executed on resume")

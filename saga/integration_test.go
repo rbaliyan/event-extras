@@ -116,7 +116,7 @@ func TestMongoStoreIntegration(t *testing.T) {
 		db.Drop(context.Background())
 	})
 
-	store := NewMongoStore(db).WithCollection("saga_states")
+	store := NewMongoStore(db, WithCollection("saga_states"))
 	if err := store.EnsureIndexes(ctx); err != nil {
 		t.Fatalf("EnsureIndexes failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestPostgresStoreIntegration(t *testing.T) {
 	// Use a unique table for this test
 	tableName := "saga_test_" + time.Now().Format("20060102150405")
 
-	store := NewPostgresStore(db).WithTable(tableName)
+	store := NewPostgresStore(db, WithTable(tableName))
 	if err := store.EnsureTable(ctx); err != nil {
 		t.Fatalf("EnsureTable failed: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRedisStoreIntegration(t *testing.T) {
 	// Use a unique prefix for this test
 	prefix := "saga:test:" + time.Now().Format("20060102150405") + ":"
 
-	store := NewRedisStore(client).WithPrefix(prefix)
+	store := NewRedisStore(client, WithPrefix(prefix))
 
 	t.Cleanup(func() {
 		// Clean up test keys

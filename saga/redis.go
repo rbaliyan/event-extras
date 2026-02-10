@@ -38,12 +38,12 @@ Uses Redis Hashes for saga state:
 // Example:
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	store := saga.NewRedisStore(rdb).
-//	    WithKeyPrefix("myapp:saga:").
-//	    WithTTL(7 * 24 * time.Hour)
+//	store := saga.NewRedisStore(rdb,
+//	    saga.WithKeyPrefix("myapp:saga:"),
+//	    saga.WithTTL(7 * 24 * time.Hour),
+//	)
 //
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithStore(store)
+//	orderSaga, _ := saga.New("order-creation", steps, saga.WithStore(store))
 type RedisStore struct {
 	client       redis.Cmdable
 	prefix       string
@@ -53,44 +53,31 @@ type RedisStore struct {
 	ttl          time.Duration // TTL for completed sagas (0 = no expiry)
 }
 
-// NewRedisStore creates a new Redis saga store.
-//
-// Parameters:
-//   - client: A connected Redis client (supports single node, Sentinel, Cluster)
-//
-// Default configuration:
-//   - Key prefix: "saga:"
-//   - TTL: 0 (no expiry)
-//
-// Example:
-//
-//	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
-//	store := saga.NewRedisStore(rdb)
-func NewRedisStore(client redis.Cmdable) *RedisStore {
-	return &RedisStore{
-		client:       client,
-		prefix:       "saga:",
-		namePrefix:   "saga:by_name:",
-		statusPrefix: "saga:by_status:",
-		timeKey:      "saga:by_time",
-		ttl:          0,
-	}
+// RedisStoreOption configures a RedisStore.
+type RedisStoreOption func(*redisStoreOptions)
+
+type redisStoreOptions struct {
+	keyPrefix string
+	ttl       time.Duration
 }
 
-// WithKeyPrefix sets a custom key prefix.
+// WithKeyPrefix sets a custom key prefix for the Redis saga store.
 //
 // Use this for multi-tenant deployments or to organize keys by application.
 //
 // Parameters:
 //   - prefix: The key prefix (e.g., "myapp:saga:")
-//
-// Returns the store for method chaining.
-func (s *RedisStore) WithKeyPrefix(prefix string) *RedisStore {
-	s.prefix = prefix
-	s.namePrefix = prefix + "by_name:"
-	s.statusPrefix = prefix + "by_status:"
-	s.timeKey = prefix + "by_time"
-	return s
+func WithKeyPrefix(prefix string) RedisStoreOption {
+	return func(o *redisStoreOptions) {
+		if prefix != "" {
+			o.keyPrefix = prefix
+		}
+	}
+}
+
+// WithPrefix is an alias for WithKeyPrefix.
+func WithPrefix(prefix string) RedisStoreOption {
+	return WithKeyPrefix(prefix)
 }
 
 // WithTTL sets the TTL for completed sagas.
@@ -101,15 +88,47 @@ func (s *RedisStore) WithKeyPrefix(prefix string) *RedisStore {
 // Parameters:
 //   - ttl: Time-to-live for completed sagas (0 = no expiry)
 //
-// Returns the store for method chaining.
+// Example:
+//
+//	store := saga.NewRedisStore(rdb,
+//	    saga.WithTTL(7 * 24 * time.Hour),
+//	)
+func WithTTL(ttl time.Duration) RedisStoreOption {
+	return func(o *redisStoreOptions) {
+		o.ttl = ttl
+	}
+}
+
+// NewRedisStore creates a new Redis saga store.
+//
+// Parameters:
+//   - client: A connected Redis client (supports single node, Sentinel, Cluster)
+//   - opts: Optional configuration
+//
+// Default configuration:
+//   - Key prefix: "saga:"
+//   - TTL: 0 (no expiry)
 //
 // Example:
 //
-//	store := saga.NewRedisStore(rdb).
-//	    WithTTL(7 * 24 * time.Hour) // Keep for 7 days
-func (s *RedisStore) WithTTL(ttl time.Duration) *RedisStore {
-	s.ttl = ttl
-	return s
+//	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+//	store := saga.NewRedisStore(rdb)
+func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) *RedisStore {
+	o := &redisStoreOptions{
+		keyPrefix: "saga:",
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	return &RedisStore{
+		client:       client,
+		prefix:       o.keyPrefix,
+		namePrefix:   o.keyPrefix + "by_name:",
+		statusPrefix: o.keyPrefix + "by_status:",
+		timeKey:      o.keyPrefix + "by_time",
+		ttl:          o.ttl,
+	}
 }
 
 // Create creates a new saga instance

@@ -91,17 +91,36 @@ type MongoStore struct {
 	collection *mongo.Collection
 }
 
-// NewMongoStore creates a new MongoDB saga store
-func NewMongoStore(db *mongo.Database) *MongoStore {
-	return &MongoStore{
-		collection: db.Collection("sagas"),
+// MongoStoreOption configures a MongoStore.
+type MongoStoreOption func(*mongoStoreOptions)
+
+type mongoStoreOptions struct {
+	collection string
+}
+
+// WithCollection sets a custom collection name for the MongoDB saga store.
+func WithCollection(name string) MongoStoreOption {
+	return func(o *mongoStoreOptions) {
+		if name != "" {
+			o.collection = name
+		}
 	}
 }
 
-// WithCollection sets a custom collection name
-func (s *MongoStore) WithCollection(name string) *MongoStore {
-	s.collection = s.collection.Database().Collection(name)
-	return s
+// NewMongoStore creates a new MongoDB saga store.
+//
+// The default collection name is "sagas".
+func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) *MongoStore {
+	o := &mongoStoreOptions{
+		collection: "sagas",
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	return &MongoStore{
+		collection: db.Collection(o.collection),
+	}
 }
 
 // Collection returns the underlying MongoDB collection

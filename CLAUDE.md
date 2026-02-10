@@ -132,19 +132,20 @@ The saga uses the same backoff strategies as the main event library:
 ```go
 type BackoffStrategy = backoff.Strategy
 
-saga := saga.New("order-creation", steps...).
-    WithBackoff(&backoff.Exponential{
+s, err := saga.New("order-creation", steps,
+    saga.WithBackoff(&backoff.Exponential{
         Initial:    100 * time.Millisecond,
         Multiplier: 2.0,
         Max:        5 * time.Second,
-    }).
-    WithMaxRetries(3)
+    }),
+    saga.WithMaxRetries(3),
+)
 ```
 
 ### Key Design Patterns
 
 - **Interface-Based Design**: All stores implement the `Store` interface; all limiters implement the `Limiter` interface
-- **Functional Options**: Saga and stores configured via method chaining (`WithStore`, `WithBackoff`, `WithMaxRetries`)
+- **Functional Options**: Saga and stores configured via `New(name, steps, ...Option)` pattern
 - **Idempotent Compensations**: Compensate methods must be safe to call multiple times
 - **Compile-Time Checks**: `var _ Store = (*MemoryStore)(nil)` ensures interface compliance
 
