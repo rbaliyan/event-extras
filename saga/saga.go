@@ -548,38 +548,6 @@ func (s *Saga) Execute(ctx context.Context, id string, data any) error {
 	return s.execute(ctx, id, data)
 }
 
-// executeWithVersion is used for resuming a saga with existing version for optimistic locking.
-func (s *Saga) executeWithVersion(ctx context.Context, id string, data any, version int64) error {
-	sagaStart := time.Now()
-
-	// Record saga start if metrics enabled
-	if s.metrics != nil {
-		s.metrics.RecordSagaStart(ctx, s.name)
-	}
-
-	state := &State{
-		ID:            id,
-		Name:          s.name,
-		Status:        StatusRunning,
-		Data:          data,
-		StartedAt:     sagaStart,
-		LastUpdatedAt: sagaStart,
-		Version:       version,
-	}
-
-	// Persist initial state - update existing record when resuming
-	if s.store != nil {
-		if err := s.store.Update(ctx, state); err != nil {
-			if s.metrics != nil {
-				s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
-			}
-			return fmt.Errorf("update saga state for resume: %w", err)
-		}
-	}
-
-	return s.runSteps(ctx, id, state, sagaStart)
-}
-
 // execute is the internal execution method for new saga executions.
 func (s *Saga) execute(ctx context.Context, id string, data any) error {
 	sagaStart := time.Now()
@@ -608,16 +576,22 @@ func (s *Saga) execute(ctx context.Context, id string, data any) error {
 		}
 	}
 
-	return s.runSteps(ctx, id, state, sagaStart)
+	return s.runSteps(ctx, id, state, sagaStart, 0)
 }
 
 // runSteps executes the saga steps and handles compensation on failure.
-func (s *Saga) runSteps(ctx context.Context, id string, state *State, sagaStart time.Time) error {
+// startStep allows resuming from a specific step index, skipping already-completed steps.
+func (s *Saga) runSteps(ctx context.Context, id string, state *State, sagaStart time.Time, startStep int) error {
 	data := state.Data
 
+	// Pre-populate with already-completed steps (for resume)
 	completedSteps := make([]Step, 0, len(s.steps))
+	for i := 0; i < startStep && i < len(s.steps); i++ {
+		completedSteps = append(completedSteps, s.steps[i])
+	}
 
-	for i, step := range s.steps {
+	for i := startStep; i < len(s.steps); i++ {
+		step := s.steps[i]
 		state.CurrentStep = i
 
 		s.log().Info("executing step",
@@ -806,8 +780,8 @@ func (s *Saga) updateState(ctx context.Context, state *State) {
 // Resume attempts to resume a failed saga.
 //
 // Use Resume to retry a saga after fixing the underlying issue that caused
-// the failure. Resume loads the saga state from the store and re-executes
-// from the beginning.
+// the failure. Resume loads the saga state from the store and continues
+// execution from the first incomplete step, skipping already-completed steps.
 //
 // Resume only works for sagas in StatusFailed or StatusCompensated state.
 // Requires a store to be configured.
@@ -848,7 +822,32 @@ func (s *Saga) Resume(ctx context.Context, id string) error {
 		return fmt.Errorf("saga is not in failed state: %s", state.Status)
 	}
 
-	return s.executeWithVersion(ctx, id, state.Data, state.Version)
+	startStep := len(state.CompletedSteps)
+	sagaStart := time.Now()
+
+	if s.metrics != nil {
+		s.metrics.RecordSagaStart(ctx, s.name)
+	}
+
+	// Update state for resume, preserving completed steps
+	state.Status = StatusRunning
+	state.Error = ""
+	state.CompletedAt = nil
+	state.LastUpdatedAt = sagaStart
+
+	if err := s.store.Update(ctx, state); err != nil {
+		if s.metrics != nil {
+			s.metrics.RecordSagaEnd(ctx, s.name, StatusFailed, time.Since(sagaStart))
+		}
+		return fmt.Errorf("update saga state for resume: %w", err)
+	}
+
+	s.log().Info("resuming saga",
+		"saga_id", id,
+		"start_step", startStep,
+		"completed_steps", state.CompletedSteps)
+
+	return s.runSteps(ctx, id, state, sagaStart, startStep)
 }
 
 // TypedStep is a generic wrapper that provides type-safe Execute and Compensate methods.

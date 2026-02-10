@@ -658,9 +658,9 @@ func TestResume(t *testing.T) {
 			t.Errorf("expected completed after resume, got %s", state.Status)
 		}
 
-		// Verify both steps were executed on resume
-		if !step1Resume.wasExecuted() {
-			t.Error("step-1 should have been executed on resume")
+		// Step-1 was already completed before failure, so it should be skipped on resume
+		if step1Resume.wasExecuted() {
+			t.Error("step-1 should have been skipped on resume (already completed)")
 		}
 		if !step2Fixed.wasExecuted() {
 			t.Error("step-2 should have been executed on resume")
