@@ -39,18 +39,37 @@ type PostgresStore struct {
 	table string
 }
 
-// NewPostgresStore creates a new PostgreSQL saga store
-func NewPostgresStore(db *sql.DB) *PostgresStore {
-	return &PostgresStore{
-		db:    db,
-		table: "sagas",
+// PostgresStoreOption configures a PostgresStore.
+type PostgresStoreOption func(*postgresStoreOptions)
+
+type postgresStoreOptions struct {
+	table string
+}
+
+// WithTable sets a custom table name for the PostgreSQL saga store.
+func WithTable(table string) PostgresStoreOption {
+	return func(o *postgresStoreOptions) {
+		if table != "" {
+			o.table = table
+		}
 	}
 }
 
-// WithTable sets a custom table name
-func (s *PostgresStore) WithTable(table string) *PostgresStore {
-	s.table = table
-	return s
+// NewPostgresStore creates a new PostgreSQL saga store.
+//
+// The default table name is "sagas".
+func NewPostgresStore(db *sql.DB, opts ...PostgresStoreOption) *PostgresStore {
+	o := &postgresStoreOptions{
+		table: "sagas",
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	return &PostgresStore{
+		db:    db,
+		table: o.table,
+	}
 }
 
 // Create creates a new saga instance

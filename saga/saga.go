@@ -52,15 +52,18 @@
 //
 // Create and execute the saga:
 //
-//	orderSaga := saga.New("order-creation",
-//	    &CreateOrderStep{orderService},
-//	    &ReserveInventoryStep{inventoryService},
-//	    &ProcessPaymentStep{paymentService},
-//	    &SendConfirmationStep{emailService},
+//	orderSaga, err := saga.New("order-creation",
+//	    []saga.Step{
+//	        &CreateOrderStep{orderService},
+//	        &ReserveInventoryStep{inventoryService},
+//	        &ProcessPaymentStep{paymentService},
+//	        &SendConfirmationStep{emailService},
+//	    },
+//	    saga.WithStore(saga.NewRedisStore(redisClient)),
 //	)
-//
-//	// With persistence for recovery
-//	orderSaga = orderSaga.WithStore(saga.NewRedisStore(redisClient))
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
 //	sagaID := uuid.New().String()
 //	if err := orderSaga.Execute(ctx, sagaID, order); err != nil {
@@ -72,14 +75,15 @@
 //
 // Configure automatic retries before compensation:
 //
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithBackoff(&backoff.Exponential{
+//	orderSaga, err := saga.New("order-creation", steps,
+//	    saga.WithBackoff(&backoff.Exponential{
 //	        Initial:    time.Second,
 //	        Multiplier: 2.0,
 //	        Max:        30 * time.Second,
 //	        Jitter:     0.1,
-//	    }).
-//	    WithMaxRetries(3)
+//	    }),
+//	    saga.WithMaxRetries(3),
+//	)
 //
 // When a step fails, the saga will retry up to MaxRetries times with
 // increasing delays before triggering compensation.
@@ -101,8 +105,8 @@
 //
 // Example with Redis store:
 //
-//	store := saga.NewRedisStore(redisClient).WithTTL(7 * 24 * time.Hour)
-//	orderSaga := saga.New("order-creation", steps...).WithStore(store)
+//	store := saga.NewRedisStore(redisClient, saga.WithTTL(7 * 24 * time.Hour))
+//	orderSaga, _ := saga.New("order-creation", steps, saga.WithStore(store))
 //
 // # Best Practices
 //
@@ -291,6 +295,131 @@ type StoreFilter struct {
 // Implementations must be stateless and safe for concurrent use.
 type BackoffStrategy = backoff.Strategy
 
+// Option configures a Saga.
+type Option func(*sagaOptions)
+
+type sagaOptions struct {
+	store      Store
+	logger     *slog.Logger
+	metrics    *MetricsRecorder
+	backoff    BackoffStrategy
+	maxRetries int
+}
+
+// WithStore sets the saga store for persistence.
+//
+// Using a store enables:
+//   - State persistence after each step
+//   - Recovery of failed sagas with Resume()
+//   - Visibility into saga state for monitoring
+//
+// Parameters:
+//   - store: The store implementation to use
+//
+// Example:
+//
+//	orderSaga, err := saga.New("order", steps,
+//	    saga.WithStore(saga.NewRedisStore(redisClient)),
+//	)
+func WithStore(store Store) Option {
+	return func(o *sagaOptions) {
+		o.store = store
+	}
+}
+
+// WithLogger sets a custom logger.
+//
+// The logger is used to log step execution, failures, and compensations.
+// If not set, slog.Default() is used.
+//
+// Parameters:
+//   - logger: The slog logger to use
+func WithLogger(logger *slog.Logger) Option {
+	return func(o *sagaOptions) {
+		if logger != nil {
+			o.logger = logger
+		}
+	}
+}
+
+// WithMetrics enables OpenTelemetry metrics collection for the saga.
+//
+// When enabled, the following metrics are recorded:
+//   - saga_executions_total: Counter of saga executions by status
+//   - saga_step_executions_total: Counter of step executions by step name and result
+//   - saga_execution_duration_seconds: Histogram of saga execution duration
+//   - saga_step_duration_seconds: Histogram of step execution duration
+//   - saga_active_count: Gauge of currently running sagas
+//
+// Parameters:
+//   - recorder: The metrics recorder to use (created with NewMetricsRecorder)
+//
+// Example:
+//
+//	recorder := saga.NewMetricsRecorder("myapp")
+//	orderSaga, err := saga.New("order-creation", steps,
+//	    saga.WithMetrics(recorder),
+//	)
+func WithMetrics(recorder *MetricsRecorder) Option {
+	return func(o *sagaOptions) {
+		o.metrics = recorder
+	}
+}
+
+// WithBackoff sets a backoff strategy for step retries.
+//
+// When a step fails, the saga uses this strategy to determine how long to wait
+// before retrying. Combined with WithMaxRetries, this enables automatic retry
+// of transient failures before triggering compensation.
+//
+// If not set, steps are not retried and compensation begins immediately on failure.
+//
+// Parameters:
+//   - strategy: The backoff strategy to use
+//
+// Example:
+//
+//	orderSaga, err := saga.New("order-creation", steps,
+//	    saga.WithBackoff(&backoff.Exponential{
+//	        Initial:    time.Second,
+//	        Multiplier: 2.0,
+//	        Max:        30 * time.Second,
+//	        Jitter:     0.1,
+//	    }),
+//	    saga.WithMaxRetries(3),
+//	)
+func WithBackoff(strategy BackoffStrategy) Option {
+	return func(o *sagaOptions) {
+		o.backoff = strategy
+	}
+}
+
+// WithMaxRetries sets the maximum number of retry attempts for failed steps.
+//
+// When a step fails, it will be retried up to this many times before
+// triggering compensation. Use this in combination with WithBackoff to
+// configure the delay between retries.
+//
+// If set to 0 (default), steps are not retried and compensation begins
+// immediately on failure.
+//
+// Parameters:
+//   - max: Maximum retry attempts (0 = no retries)
+//
+// Example:
+//
+//	orderSaga, err := saga.New("order-creation", steps,
+//	    saga.WithBackoff(backoffStrategy),
+//	    saga.WithMaxRetries(3),
+//	)
+func WithMaxRetries(max int) Option {
+	return func(o *sagaOptions) {
+		if max >= 0 {
+			o.maxRetries = max
+		}
+	}
+}
+
 // Saga orchestrates a sequence of steps with compensation.
 //
 // A Saga represents a distributed transaction composed of multiple steps.
@@ -299,11 +428,17 @@ type BackoffStrategy = backoff.Strategy
 //
 // Example:
 //
-//	orderSaga := saga.New("order-creation",
-//	    &CreateOrderStep{},
-//	    &ReserveInventoryStep{},
-//	    &ProcessPaymentStep{},
-//	).WithStore(store)
+//	orderSaga, err := saga.New("order-creation",
+//	    []saga.Step{
+//	        &CreateOrderStep{},
+//	        &ReserveInventoryStep{},
+//	        &ProcessPaymentStep{},
+//	    },
+//	    saga.WithStore(store),
+//	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
 //	if err := orderSaga.Execute(ctx, sagaID, order); err != nil {
 //	    // Saga failed, compensations were run
@@ -326,147 +461,50 @@ type Saga struct {
 // Parameters:
 //   - name: Saga name for identification (e.g., "order-creation")
 //   - steps: The steps to execute in order
+//   - opts: Optional configuration
+//
+// Returns an error if name is empty or no steps are provided.
 //
 // Example:
 //
-//	saga := saga.New("order-creation",
-//	    &CreateOrderStep{orderService},
-//	    &ReserveInventoryStep{inventoryService},
-//	    &ProcessPaymentStep{paymentService},
+//	s, err := saga.New("order-creation",
+//	    []saga.Step{
+//	        &CreateOrderStep{orderService},
+//	        &ReserveInventoryStep{inventoryService},
+//	        &ProcessPaymentStep{paymentService},
+//	    },
+//	    saga.WithStore(store),
+//	    saga.WithMaxRetries(3),
 //	)
-//
-// Panics if name is empty or no steps are provided (programming error).
-func New(name string, steps ...Step) *Saga {
-	eventerrors.RequireNotEmpty(name, "name")
+func New(name string, steps []Step, opts ...Option) (*Saga, error) {
+	if name == "" {
+		return nil, fmt.Errorf("saga name is required")
+	}
 	if len(steps) == 0 {
-		panic("at least one step is required")
+		return nil, fmt.Errorf("at least one step is required")
 	}
+
+	o := &sagaOptions{
+		logger: slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	return &Saga{
-		name:   name,
-		steps:  steps,
-		logger: slog.Default().With("saga", name),
-	}
-}
-
-// WithStore sets the saga store for persistence.
-//
-// Using a store enables:
-//   - State persistence after each step
-//   - Recovery of failed sagas with Resume()
-//   - Visibility into saga state for monitoring
-//
-// Parameters:
-//   - store: The store implementation to use
-//
-// Returns the saga for method chaining.
-//
-// Example:
-//
-//	saga := saga.New("order", steps...).
-//	    WithStore(saga.NewRedisStore(redisClient))
-func (s *Saga) WithStore(store Store) *Saga {
-	s.store = store
-	return s
-}
-
-// WithLogger sets a custom logger.
-//
-// The logger is used to log step execution, failures, and compensations.
-// If not set, slog.Default() is used.
-//
-// Parameters:
-//   - logger: The slog logger to use
-//
-// Returns the saga for method chaining.
-func (s *Saga) WithLogger(logger *slog.Logger) *Saga {
-	s.logger = logger.With("saga", s.name)
-	return s
+		name:       name,
+		steps:      steps,
+		store:      o.store,
+		logger:     o.logger.With("saga", name),
+		metrics:    o.metrics,
+		backoff:    o.backoff,
+		maxRetries: o.maxRetries,
+	}, nil
 }
 
 // log returns the configured logger.
 func (s *Saga) log() *slog.Logger {
 	return s.logger
-}
-
-// WithMetrics enables OpenTelemetry metrics collection for the saga.
-//
-// When enabled, the following metrics are recorded:
-//   - saga_executions_total: Counter of saga executions by status
-//   - saga_step_executions_total: Counter of step executions by step name and result
-//   - saga_execution_duration_seconds: Histogram of saga execution duration
-//   - saga_step_duration_seconds: Histogram of step execution duration
-//   - saga_active_count: Gauge of currently running sagas
-//
-// Parameters:
-//   - recorder: The metrics recorder to use (created with NewMetricsRecorder)
-//
-// Returns the saga for method chaining.
-//
-// Example:
-//
-//	recorder := saga.NewMetricsRecorder("myapp")
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithMetrics(recorder)
-func (s *Saga) WithMetrics(recorder *MetricsRecorder) *Saga {
-	s.metrics = recorder
-	return s
-}
-
-// WithBackoff sets a backoff strategy for step retries.
-//
-// When a step fails, the saga uses this strategy to determine how long to wait
-// before retrying. Combined with WithMaxRetries, this enables automatic retry
-// of transient failures before triggering compensation.
-//
-// If not set, steps are not retried and compensation begins immediately on failure.
-//
-// Parameters:
-//   - strategy: The backoff strategy to use
-//
-// Returns the saga for method chaining.
-//
-// Example:
-//
-//	// Using the event library's backoff package
-//	import "github.com/rbaliyan/event/v3/backoff"
-//
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithBackoff(&backoff.Exponential{
-//	        Initial:    time.Second,
-//	        Multiplier: 2.0,
-//	        Max:        30 * time.Second,
-//	        Jitter:     0.1,
-//	    }).
-//	    WithMaxRetries(3)
-func (s *Saga) WithBackoff(strategy BackoffStrategy) *Saga {
-	s.backoff = strategy
-	return s
-}
-
-// WithMaxRetries sets the maximum number of retry attempts for failed steps.
-//
-// When a step fails, it will be retried up to this many times before
-// triggering compensation. Use this in combination with WithBackoff to
-// configure the delay between retries.
-//
-// If set to 0 (default), steps are not retried and compensation begins
-// immediately on failure.
-//
-// Parameters:
-//   - max: Maximum retry attempts (0 = no retries)
-//
-// Returns the saga for method chaining.
-//
-// Example:
-//
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithBackoff(backoffStrategy).
-//	    WithMaxRetries(3)  // Retry up to 3 times before compensation
-func (s *Saga) WithMaxRetries(max int) *Saga {
-	if max >= 0 {
-		s.maxRetries = max
-	}
-	return s
 }
 
 // Name returns the saga name.
@@ -838,7 +876,7 @@ func (s *Saga) Resume(ctx context.Context, id string) error {
 //	step := saga.NewTypedStep("reserve-inventory", reserveInventory, releaseInventory)
 //
 //	// Use in saga
-//	orderSaga := saga.New("order-creation", step)
+//	orderSaga, _ := saga.New("order-creation", []saga.Step{step})
 //	orderSaga.Execute(ctx, sagaID, &OrderData{OrderID: "123"})
 type TypedStep[T any] struct {
 	name       string

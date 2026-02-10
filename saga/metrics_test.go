@@ -70,7 +70,7 @@ func TestSagaWithMetrics_Success(t *testing.T) {
 	step1 := newMockStep("step1")
 	step2 := newMockStep("step2")
 
-	s := New("test-saga", step1, step2).WithMetrics(recorder)
+	s, _ := New("test-saga", []Step{step1, step2}, WithMetrics(recorder))
 
 	ctx := context.Background()
 	err := s.Execute(ctx, "saga-1", "data")
@@ -90,7 +90,7 @@ func TestSagaWithMetrics_Failure(t *testing.T) {
 	step2 := newMockStep("step2")
 	step2.executeErr = errors.New("step2 failed")
 
-	s := New("test-saga", step1, step2).WithMetrics(recorder)
+	s, _ := New("test-saga", []Step{step1, step2}, WithMetrics(recorder))
 
 	ctx := context.Background()
 	err := s.Execute(ctx, "saga-1", "data")
@@ -116,7 +116,7 @@ func TestSagaWithMetrics_CompensationFailure(t *testing.T) {
 	step2 := newMockStep("step2")
 	step2.executeErr = errors.New("step2 failed")
 
-	s := New("test-saga", step1, step2).WithMetrics(recorder)
+	s, _ := New("test-saga", []Step{step1, step2}, WithMetrics(recorder))
 
 	ctx := context.Background()
 	err := s.Execute(ctx, "saga-1", "data")
@@ -134,7 +134,7 @@ func TestSagaWithMetrics_NilRecorder(t *testing.T) {
 	// Ensure saga works without metrics (nil recorder)
 	step1 := newMockStep("step1")
 
-	s := New("test-saga", step1)
+	s, _ := New("test-saga", []Step{step1})
 	// Don't call WithMetrics - metrics should be nil
 
 	ctx := context.Background()
@@ -170,7 +170,8 @@ func TestSagaWithMetrics_ConcurrentExecutions(t *testing.T) {
 	// Create saga with delay step
 	createSaga := func() *Saga {
 		step := newDelayStep("step1", time.Millisecond*10)
-		return New("test-saga", step).WithMetrics(recorder)
+		s, _ := New("test-saga", []Step{step}, WithMetrics(recorder))
+		return s
 	}
 
 	ctx := context.Background()
