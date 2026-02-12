@@ -6,7 +6,7 @@ toolchain go1.24.13
 
 require (
 	github.com/lib/pq v1.11.1
-	github.com/rbaliyan/event/v3 v3.7.11
+	github.com/rbaliyan/event/v3 v3.8.0
 	github.com/redis/go-redis/v9 v9.17.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	go.opentelemetry.io/otel v1.40.0
