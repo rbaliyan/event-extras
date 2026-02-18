@@ -3,6 +3,7 @@ package saga
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -108,7 +109,11 @@ func WithTTL(ttl time.Duration) RedisStoreOption {
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 //	store := saga.NewRedisStore(rdb)
-func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) *RedisStore {
+func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) (*RedisStore, error) {
+	if client == nil {
+		return nil, fmt.Errorf("client must not be nil")
+	}
+
 	o := &redisStoreOptions{
 		keyPrefix: "saga:",
 	}
@@ -123,7 +128,7 @@ func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) *RedisStore {
 		statusPrefix: o.keyPrefix + "by_status:",
 		timeKey:      o.keyPrefix + "by_time",
 		ttl:          o.ttl,
-	}
+	}, nil
 }
 
 // Create creates a new saga instance
@@ -325,7 +330,7 @@ func (s *RedisStore) Update(ctx context.Context, state *State) error {
 
 	// Get old status for index update
 	oldStatus, err := s.client.HGet(ctx, key, "status").Result()
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("hget: %w", err)
 	}
 
