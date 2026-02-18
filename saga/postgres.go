@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -140,7 +141,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 		&state.Version,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("saga not found: %s", id)
 	}
 	if err != nil {
