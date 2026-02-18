@@ -111,7 +111,11 @@ func WithCollection(name string) MongoStoreOption {
 // NewMongoStore creates a new MongoDB saga store.
 //
 // The default collection name is "sagas".
-func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) *MongoStore {
+func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) (*MongoStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+
 	o := &mongoStoreOptions{
 		collection: "sagas",
 	}
@@ -121,7 +125,7 @@ func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) *MongoStore {
 
 	return &MongoStore{
 		collection: db.Collection(o.collection),
-	}
+	}, nil
 }
 
 // Collection returns the underlying MongoDB collection

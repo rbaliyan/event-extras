@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -151,7 +152,7 @@ func (r *RedisLimiter) Reserve(ctx context.Context) Reservation {
 // Returns limit if no events have been recorded in this window.
 func (r *RedisLimiter) Remaining(ctx context.Context) (int, error) {
 	val, err := r.client.Get(ctx, r.key).Int()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return r.limit, nil
 	}
 	if err != nil {
