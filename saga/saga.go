@@ -512,9 +512,11 @@ func (s *Saga) Name() string {
 	return s.name
 }
 
-// Steps returns the saga steps.
+// Steps returns a copy of the saga steps.
 func (s *Saga) Steps() []Step {
-	return s.steps
+	steps := make([]Step, len(s.steps))
+	copy(steps, s.steps)
+	return steps
 }
 
 // Execute executes the saga with the given ID and data.

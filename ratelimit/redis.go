@@ -61,6 +61,12 @@ type RedisLimiter struct {
 //	// 1000 requests per minute
 //	limiter := ratelimit.NewRedisLimiter(rdb, "my-service", 1000, time.Minute)
 func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Duration) *RedisLimiter {
+	if limit <= 0 {
+		limit = 1
+	}
+	if window <= 0 {
+		window = time.Second
+	}
 	return &RedisLimiter{
 		client: client,
 		key:    "ratelimit:" + key,

@@ -132,6 +132,19 @@ func (s *MemoryStore) List(ctx context.Context, filter StoreFilter) ([]*State, e
 	return results, nil
 }
 
+// Delete removes a saga by ID.
+func (s *MemoryStore) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sagas[id]; !ok {
+		return fmt.Errorf("saga not found: %s", id)
+	}
+
+	delete(s.sagas, id)
+	return nil
+}
+
 // Cleanup removes completed sagas older than the specified age
 func (s *MemoryStore) Cleanup(age time.Duration) int {
 	s.mu.Lock()

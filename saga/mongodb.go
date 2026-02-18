@@ -2,6 +2,7 @@ package saga
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -190,7 +191,7 @@ func (s *MongoStore) Get(ctx context.Context, id string) (*State, error) {
 	var mongoState mongoState
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoState)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("saga not found: %s", id)
 		}
 		return nil, fmt.Errorf("find: %w", err)
