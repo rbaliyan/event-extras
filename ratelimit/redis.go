@@ -57,11 +57,14 @@ type RedisLimiter struct {
 // Example:
 //
 //	// 100 requests per second
-//	limiter := ratelimit.NewRedisLimiter(rdb, "my-service", 100, time.Second)
+//	limiter, err := ratelimit.NewRedisLimiter(rdb, "my-service", 100, time.Second)
 //
 //	// 1000 requests per minute
-//	limiter := ratelimit.NewRedisLimiter(rdb, "my-service", 1000, time.Minute)
-func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Duration) *RedisLimiter {
+//	limiter, err := ratelimit.NewRedisLimiter(rdb, "my-service", 1000, time.Minute)
+func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Duration) (*RedisLimiter, error) {
+	if client == nil {
+		return nil, fmt.Errorf("client must not be nil")
+	}
 	if limit <= 0 {
 		limit = 1
 	}
@@ -88,7 +91,7 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 			end
 			return 1
 		`),
-	}
+	}, nil
 }
 
 // Allow returns true if an event can happen right now.

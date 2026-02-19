@@ -38,8 +38,11 @@ func (s *MemoryStore) Create(ctx context.Context, state *State) error {
 		return fmt.Errorf("saga already exists: %s", state.ID)
 	}
 
-	// Make a copy
 	stored := *state
+	if state.CompletedSteps != nil {
+		stored.CompletedSteps = make([]string, len(state.CompletedSteps))
+		copy(stored.CompletedSteps, state.CompletedSteps)
+	}
 	s.sagas[state.ID] = &stored
 
 	return nil
@@ -89,8 +92,11 @@ func (s *MemoryStore) Update(ctx context.Context, state *State) error {
 	// Increment version
 	state.Version++
 
-	// Make a copy
 	stored := *state
+	if state.CompletedSteps != nil {
+		stored.CompletedSteps = make([]string, len(state.CompletedSteps))
+		copy(stored.CompletedSteps, state.CompletedSteps)
+	}
 	s.sagas[state.ID] = &stored
 
 	return nil
