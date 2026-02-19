@@ -37,7 +37,7 @@
 //	limiter := ratelimit.NewTokenBucket(100, 10)
 //
 //	// Distributed rate limiter using Redis
-//	limiter := ratelimit.NewRedisLimiter(redisClient, "my-service", 100, time.Second)
+//	limiter, err := ratelimit.NewRedisLimiter(redisClient, "my-service", 100, time.Second)
 //
 //	// Use in handler
 //	if err := limiter.Wait(ctx); err != nil {

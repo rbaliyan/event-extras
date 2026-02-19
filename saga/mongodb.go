@@ -2,6 +2,7 @@ package saga
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -37,8 +38,8 @@ db.sagas.createIndex({ "started_at": 1 })
 db.sagas.createIndex({ "name": 1, "status": 1 })
 */
 
-// MongoState represents the saga state document in MongoDB
-type MongoState struct {
+// mongoState represents the saga state document in MongoDB
+type mongoState struct {
 	ID             string     `bson:"_id"`
 	Name           string     `bson:"name"`
 	Status         Status     `bson:"status"`
@@ -52,8 +53,8 @@ type MongoState struct {
 	Version        int64      `bson:"version"`
 }
 
-// ToState converts MongoState to State
-func (m *MongoState) ToState() *State {
+// toState converts mongoState to State
+func (m *mongoState) toState() *State {
 	return &State{
 		ID:             m.ID,
 		Name:           m.Name,
@@ -69,9 +70,9 @@ func (m *MongoState) ToState() *State {
 	}
 }
 
-// FromState creates a MongoState from State
-func FromState(s *State) *MongoState {
-	return &MongoState{
+// fromState creates a mongoState from State
+func fromState(s *State) *mongoState {
+	return &mongoState{
 		ID:             s.ID,
 		Name:           s.Name,
 		Status:         s.Status,
@@ -110,7 +111,11 @@ func WithCollection(name string) MongoStoreOption {
 // NewMongoStore creates a new MongoDB saga store.
 //
 // The default collection name is "sagas".
-func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) *MongoStore {
+func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) (*MongoStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+
 	o := &mongoStoreOptions{
 		collection: "sagas",
 	}
@@ -120,7 +125,7 @@ func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) *MongoStore {
 
 	return &MongoStore{
 		collection: db.Collection(o.collection),
-	}
+	}, nil
 }
 
 // Collection returns the underlying MongoDB collection
@@ -170,7 +175,7 @@ func (s *MongoStore) Create(ctx context.Context, state *State) error {
 		return fmt.Errorf("state ID is required")
 	}
 
-	mongoState := FromState(state)
+	mongoState := fromState(state)
 
 	_, err := s.collection.InsertOne(ctx, mongoState)
 	if err != nil {
@@ -187,16 +192,16 @@ func (s *MongoStore) Create(ctx context.Context, state *State) error {
 func (s *MongoStore) Get(ctx context.Context, id string) (*State, error) {
 	filter := bson.M{"_id": id}
 
-	var mongoState MongoState
+	var mongoState mongoState
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoState)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, fmt.Errorf("saga not found: %s", id)
 		}
 		return nil, fmt.Errorf("find: %w", err)
 	}
 
-	return mongoState.ToState(), nil
+	return mongoState.toState(), nil
 }
 
 // Update updates saga state with optimistic locking.
@@ -275,11 +280,11 @@ func (s *MongoStore) List(ctx context.Context, filter StoreFilter) ([]*State, er
 
 	var results []*State
 	for cursor.Next(ctx) {
-		var mongoState MongoState
+		var mongoState mongoState
 		if err := cursor.Decode(&mongoState); err != nil {
 			return nil, fmt.Errorf("decode: %w", err)
 		}
-		results = append(results, mongoState.ToState())
+		results = append(results, mongoState.toState())
 	}
 
 	return results, cursor.Err()
@@ -421,13 +426,17 @@ func (s *MongoStore) GetStats(ctx context.Context) (*Stats, error) {
 		stats.ByName[result.Name] = result.Count
 	}
 
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor error: %w", err)
+	}
+
 	// Find oldest active saga
 	activeFilter := bson.M{
 		"status": bson.M{"$in": []Status{StatusPending, StatusRunning, StatusCompensating}},
 	}
 	opts := options.FindOne().SetSort(bson.D{{Key: "started_at", Value: 1}})
 
-	var oldest MongoState
+	var oldest mongoState
 	err = s.collection.FindOne(ctx, activeFilter, opts).Decode(&oldest)
 	if err == nil {
 		stats.OldestActive = &oldest.StartedAt

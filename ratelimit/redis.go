@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -56,11 +57,20 @@ type RedisLimiter struct {
 // Example:
 //
 //	// 100 requests per second
-//	limiter := ratelimit.NewRedisLimiter(rdb, "my-service", 100, time.Second)
+//	limiter, err := ratelimit.NewRedisLimiter(rdb, "my-service", 100, time.Second)
 //
 //	// 1000 requests per minute
-//	limiter := ratelimit.NewRedisLimiter(rdb, "my-service", 1000, time.Minute)
-func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Duration) *RedisLimiter {
+//	limiter, err := ratelimit.NewRedisLimiter(rdb, "my-service", 1000, time.Minute)
+func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Duration) (*RedisLimiter, error) {
+	if client == nil {
+		return nil, fmt.Errorf("client must not be nil")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	if window <= 0 {
+		window = time.Second
+	}
 	return &RedisLimiter{
 		client: client,
 		key:    "ratelimit:" + key,
@@ -81,7 +91,7 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 			end
 			return 1
 		`),
-	}
+	}, nil
 }
 
 // Allow returns true if an event can happen right now.
@@ -145,7 +155,7 @@ func (r *RedisLimiter) Reserve(ctx context.Context) Reservation {
 // Returns limit if no events have been recorded in this window.
 func (r *RedisLimiter) Remaining(ctx context.Context) (int, error) {
 	val, err := r.client.Get(ctx, r.key).Int()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return r.limit, nil
 	}
 	if err != nil {

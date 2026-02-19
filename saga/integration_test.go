@@ -5,6 +5,7 @@ package saga
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -116,7 +117,10 @@ func TestMongoStoreIntegration(t *testing.T) {
 		db.Drop(context.Background())
 	})
 
-	store := NewMongoStore(db, WithCollection("saga_states"))
+	store, err := NewMongoStore(db, WithCollection("saga_states"))
+	if err != nil {
+		t.Fatalf("NewMongoStore failed: %v", err)
+	}
 	if err := store.EnsureIndexes(ctx); err != nil {
 		t.Fatalf("EnsureIndexes failed: %v", err)
 	}
@@ -132,9 +136,29 @@ func TestPostgresStoreIntegration(t *testing.T) {
 	// Use a unique table for this test
 	tableName := "saga_test_" + time.Now().Format("20060102150405")
 
-	store := NewPostgresStore(db, WithTable(tableName))
-	if err := store.EnsureTable(ctx); err != nil {
-		t.Fatalf("EnsureTable failed: %v", err)
+	store, err := NewPostgresStore(db, WithTable(tableName))
+	if err != nil {
+		t.Fatalf("NewPostgresStore failed: %v", err)
+	}
+
+	query := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
+			id              VARCHAR(36) PRIMARY KEY,
+			name            VARCHAR(255) NOT NULL,
+			status          VARCHAR(50) NOT NULL,
+			current_step    INT NOT NULL DEFAULT 0,
+			completed_steps TEXT[],
+			data            JSONB,
+			error           TEXT,
+			started_at      TIMESTAMP NOT NULL,
+			completed_at    TIMESTAMP,
+			last_updated_at TIMESTAMP NOT NULL,
+			version         BIGINT NOT NULL DEFAULT 0
+		)
+	`, tableName)
+
+	if _, err := db.ExecContext(ctx, query); err != nil {
+		t.Fatalf("Create table failed: %v", err)
 	}
 
 	t.Cleanup(func() {
@@ -151,7 +175,10 @@ func TestRedisStoreIntegration(t *testing.T) {
 	// Use a unique prefix for this test
 	prefix := "saga:test:" + time.Now().Format("20060102150405") + ":"
 
-	store := NewRedisStore(client, WithPrefix(prefix))
+	store, err := NewRedisStore(client, WithKeyPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewRedisStore failed: %v", err)
+	}
 
 	t.Cleanup(func() {
 		// Clean up test keys

@@ -4,12 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/rbaliyan/event/v3/health"
 )
+
+// validIdentifier matches safe SQL identifiers (alphanumeric and underscores).
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 /*
 PostgreSQL Schema:
@@ -58,7 +63,11 @@ func WithTable(table string) PostgresStoreOption {
 // NewPostgresStore creates a new PostgreSQL saga store.
 //
 // The default table name is "sagas".
-func NewPostgresStore(db *sql.DB, opts ...PostgresStoreOption) *PostgresStore {
+func NewPostgresStore(db *sql.DB, opts ...PostgresStoreOption) (*PostgresStore, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db must not be nil")
+	}
+
 	o := &postgresStoreOptions{
 		table: "sagas",
 	}
@@ -66,10 +75,14 @@ func NewPostgresStore(db *sql.DB, opts ...PostgresStoreOption) *PostgresStore {
 		opt(o)
 	}
 
+	if !validIdentifier.MatchString(o.table) {
+		return nil, fmt.Errorf("invalid table name %q", o.table)
+	}
+
 	return &PostgresStore{
 		db:    db,
 		table: o.table,
-	}
+	}, nil
 }
 
 // Create creates a new saga instance
@@ -140,7 +153,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 		&state.Version,
 	)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("saga not found: %s", id)
 	}
 	if err != nil {
@@ -309,6 +322,10 @@ func (s *PostgresStore) List(ctx context.Context, filter StoreFilter) ([]*State,
 		}
 
 		results = append(results, &state)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 
 	return results, nil
