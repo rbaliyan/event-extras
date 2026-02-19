@@ -58,8 +58,11 @@ type SlidingWindowLimiter struct {
 // Example:
 //
 //	// 100 requests per second with sliding window
-//	limiter := ratelimit.NewSlidingWindowLimiter(rdb, "my-service", 100, time.Second)
-func NewSlidingWindowLimiter(client redis.Cmdable, key string, limit int, window time.Duration) *SlidingWindowLimiter {
+//	limiter, err := ratelimit.NewSlidingWindowLimiter(rdb, "my-service", 100, time.Second)
+func NewSlidingWindowLimiter(client redis.Cmdable, key string, limit int, window time.Duration) (*SlidingWindowLimiter, error) {
+	if client == nil {
+		return nil, fmt.Errorf("client must not be nil")
+	}
 	if limit <= 0 {
 		limit = 1
 	}
@@ -94,7 +97,7 @@ func NewSlidingWindowLimiter(client redis.Cmdable, key string, limit int, window
 
 			return 1
 		`),
-	}
+	}, nil
 }
 
 // Allow returns true if an event can happen right now.

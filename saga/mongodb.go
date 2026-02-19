@@ -426,6 +426,10 @@ func (s *MongoStore) GetStats(ctx context.Context) (*Stats, error) {
 		stats.ByName[result.Name] = result.Count
 	}
 
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor error: %w", err)
+	}
+
 	// Find oldest active saga
 	activeFilter := bson.M{
 		"status": bson.M{"$in": []Status{StatusPending, StatusRunning, StatusCompensating}},
