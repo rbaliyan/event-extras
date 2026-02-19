@@ -38,8 +38,11 @@ func (s *MemoryStore) Create(ctx context.Context, state *State) error {
 		return fmt.Errorf("saga already exists: %s", state.ID)
 	}
 
-	// Make a copy
 	stored := *state
+	if state.CompletedSteps != nil {
+		stored.CompletedSteps = make([]string, len(state.CompletedSteps))
+		copy(stored.CompletedSteps, state.CompletedSteps)
+	}
 	s.sagas[state.ID] = &stored
 
 	return nil
@@ -89,8 +92,11 @@ func (s *MemoryStore) Update(ctx context.Context, state *State) error {
 	// Increment version
 	state.Version++
 
-	// Make a copy
 	stored := *state
+	if state.CompletedSteps != nil {
+		stored.CompletedSteps = make([]string, len(state.CompletedSteps))
+		copy(stored.CompletedSteps, state.CompletedSteps)
+	}
 	s.sagas[state.ID] = &stored
 
 	return nil
@@ -130,6 +136,19 @@ func (s *MemoryStore) List(ctx context.Context, filter StoreFilter) ([]*State, e
 	}
 
 	return results, nil
+}
+
+// Delete removes a saga by ID.
+func (s *MemoryStore) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.sagas[id]; !ok {
+		return fmt.Errorf("saga not found: %s", id)
+	}
+
+	delete(s.sagas, id)
+	return nil
 }
 
 // Cleanup removes completed sagas older than the specified age

@@ -3,6 +3,7 @@ package saga
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -75,11 +76,6 @@ func WithKeyPrefix(prefix string) RedisStoreOption {
 	}
 }
 
-// WithPrefix is an alias for WithKeyPrefix.
-func WithPrefix(prefix string) RedisStoreOption {
-	return WithKeyPrefix(prefix)
-}
-
 // WithTTL sets the TTL for completed sagas.
 //
 // When set, completed and compensated sagas are automatically deleted
@@ -113,7 +109,11 @@ func WithTTL(ttl time.Duration) RedisStoreOption {
 //
 //	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
 //	store := saga.NewRedisStore(rdb)
-func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) *RedisStore {
+func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) (*RedisStore, error) {
+	if client == nil {
+		return nil, fmt.Errorf("client must not be nil")
+	}
+
 	o := &redisStoreOptions{
 		keyPrefix: "saga:",
 	}
@@ -128,7 +128,7 @@ func NewRedisStore(client redis.Cmdable, opts ...RedisStoreOption) *RedisStore {
 		statusPrefix: o.keyPrefix + "by_status:",
 		timeKey:      o.keyPrefix + "by_time",
 		ttl:          o.ttl,
-	}
+	}, nil
 }
 
 // Create creates a new saga instance
@@ -175,8 +175,14 @@ func (s *RedisStore) Create(ctx context.Context, state *State) error {
 
 // saveState saves saga state to Redis hash
 func (s *RedisStore) saveState(ctx context.Context, key string, state *State) error {
-	completedSteps, _ := json.Marshal(state.CompletedSteps)
-	data, _ := json.Marshal(state.Data)
+	completedSteps, err := json.Marshal(state.CompletedSteps)
+	if err != nil {
+		return fmt.Errorf("marshal completed_steps: %w", err)
+	}
+	data, err := json.Marshal(state.Data)
+	if err != nil {
+		return fmt.Errorf("marshal data: %w", err)
+	}
 
 	fields := map[string]any{
 		"id":              state.ID,
@@ -324,7 +330,7 @@ func (s *RedisStore) Update(ctx context.Context, state *State) error {
 
 	// Get old status for index update
 	oldStatus, err := s.client.HGet(ctx, key, "status").Result()
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		return fmt.Errorf("hget: %w", err)
 	}
 

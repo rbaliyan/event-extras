@@ -156,7 +156,7 @@ func (m *Metrics) RecordWaitDuration(ctx context.Context, limiterName string, se
 // Example:
 //
 //	metrics, _ := ratelimit.NewMetrics()
-//	baseLimiter := ratelimit.NewRedisLimiter(client, "api", 100, time.Second)
+//	baseLimiter, _ := ratelimit.NewRedisLimiter(client, "api", 100, time.Second)
 //	limiter := ratelimit.NewMetricsLimiter(baseLimiter, "api-limiter", metrics)
 type MetricsLimiter struct {
 	limiter Limiter
