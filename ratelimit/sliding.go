@@ -131,20 +131,23 @@ func (s *SlidingWindowLimiter) Allow(ctx context.Context) bool {
 func (s *SlidingWindowLimiter) Wait(ctx context.Context) error {
 	backoff := time.Millisecond * 10
 
+	maxBackoff := s.window / time.Duration(s.limit)
+
 	for {
+		if s.Allow(ctx) {
+			return nil
+		}
+		// Exponential backoff with max
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		default:
-			if s.Allow(ctx) {
-				return nil
-			}
-			// Exponential backoff with max
-			time.Sleep(backoff)
-			backoff *= 2
-			if backoff > s.window/time.Duration(s.limit) {
-				backoff = s.window / time.Duration(s.limit)
-			}
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
 }

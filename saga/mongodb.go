@@ -287,7 +287,10 @@ func (s *MongoStore) List(ctx context.Context, filter StoreFilter) ([]*State, er
 		results = append(results, mongoState.toState())
 	}
 
-	return results, cursor.Err()
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("cursor iteration: %w", err)
+	}
+	return results, nil
 }
 
 // Delete removes a saga by ID
