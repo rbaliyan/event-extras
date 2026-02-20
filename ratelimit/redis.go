@@ -117,19 +117,20 @@ func (r *RedisLimiter) Wait(ctx context.Context) error {
 	maxBackoff := r.window / time.Duration(r.limit)
 
 	for {
+		if r.Allow(ctx) {
+			return nil
+		}
+		// Exponential backoff with max
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		default:
-			if r.Allow(ctx) {
-				return nil
-			}
-			// Exponential backoff with max
-			time.Sleep(backoff)
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
+		case <-timer.C:
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
 }

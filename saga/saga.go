@@ -619,10 +619,12 @@ func (s *Saga) runSteps(ctx context.Context, id string, state *State, sagaStart 
 					"attempt", attempt+1,
 					"backoff_delay", backoffDelay)
 
+				timer := time.NewTimer(backoffDelay)
 				select {
 				case <-ctx.Done():
+					timer.Stop()
 					err = ctx.Err()
-				case <-time.After(backoffDelay):
+				case <-timer.C:
 					// Continue with retry
 				}
 

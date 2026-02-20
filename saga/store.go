@@ -58,8 +58,12 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (*State, error) {
 		return nil, fmt.Errorf("saga not found: %s", id)
 	}
 
-	// Return a copy
+	// Return a deep copy
 	result := *state
+	if state.CompletedSteps != nil {
+		result.CompletedSteps = make([]string, len(state.CompletedSteps))
+		copy(result.CompletedSteps, state.CompletedSteps)
+	}
 	return &result, nil
 }
 
@@ -128,6 +132,10 @@ func (s *MemoryStore) List(ctx context.Context, filter StoreFilter) ([]*State, e
 		}
 
 		result := *state
+		if state.CompletedSteps != nil {
+			result.CompletedSteps = make([]string, len(state.CompletedSteps))
+			copy(result.CompletedSteps, state.CompletedSteps)
+		}
 		results = append(results, &result)
 
 		if filter.Limit > 0 && len(results) >= filter.Limit {
