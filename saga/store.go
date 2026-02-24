@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/health"
 )
 
@@ -55,7 +56,7 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (*State, error) {
 
 	state, ok := s.sagas[id]
 	if !ok {
-		return nil, fmt.Errorf("saga not found: %s", id)
+		return nil, eventerrors.NewNotFoundError("saga", id)
 	}
 
 	// Return a deep copy
@@ -85,7 +86,7 @@ func (s *MemoryStore) Update(ctx context.Context, state *State) error {
 
 	existing, exists := s.sagas[state.ID]
 	if !exists {
-		return fmt.Errorf("saga not found: %s", state.ID)
+		return eventerrors.NewNotFoundError("saga", state.ID)
 	}
 
 	// Check version for optimistic locking
@@ -152,7 +153,7 @@ func (s *MemoryStore) Delete(ctx context.Context, id string) error {
 	defer s.mu.Unlock()
 
 	if _, ok := s.sagas[id]; !ok {
-		return fmt.Errorf("saga not found: %s", id)
+		return eventerrors.NewNotFoundError("saga", id)
 	}
 
 	delete(s.sagas, id)

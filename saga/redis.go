@@ -3,11 +3,11 @@ package saga
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/health"
 	"github.com/redis/go-redis/v9"
 )
@@ -218,7 +218,7 @@ func (s *RedisStore) Get(ctx context.Context, id string) (*State, error) {
 	}
 
 	if len(fields) == 0 {
-		return nil, fmt.Errorf("saga not found: %s", id)
+		return nil, eventerrors.NewNotFoundError("saga", id)
 	}
 
 	return s.parseState(fields)
@@ -289,26 +289,71 @@ func (s *RedisStore) parseState(fields map[string]string) (*State, error) {
 	return state, nil
 }
 
-// updateScript is a Lua script for atomic compare-and-swap update with version checking.
+// updateScript is a Lua script for atomic saga state update.
+//
+// It atomically: reads old status, checks version, updates all hash fields,
+// updates status indexes (SRem old + SAdd new), and optionally sets TTL.
+// This eliminates the TOCTOU race between reading the old status and updating indexes.
+//
+// KEYS[1] = saga hash key
+// KEYS[2] = old status index key (prefix only, old status appended by script)
+// KEYS[3] = new status index key
+//
+// ARGV[1]  = expected version
+// ARGV[2]  = new version
+// ARGV[3]  = new status string
+// ARGV[4]  = saga ID (for index membership)
+// ARGV[5]  = status prefix (for building old status index key)
+// ARGV[6]  = TTL in seconds (0 = no expiry)
+// ARGV[7..N] = field, value pairs for HSET
+//
 // Returns: 0 = success, 1 = version conflict, 2 = not found
 var updateScript = redis.NewScript(`
 local key = KEYS[1]
 local expected_version = tonumber(ARGV[1])
 local new_version = tonumber(ARGV[2])
+local new_status = ARGV[3]
+local saga_id = ARGV[4]
+local status_prefix = ARGV[5]
+local ttl = tonumber(ARGV[6])
 
--- Check if key exists
-local current_version = redis.call('HGET', key, 'version')
-if current_version == false then
+-- Check if key exists and read current version + status atomically
+local current = redis.call('HMGET', key, 'version', 'status')
+if current[1] == false then
     return 2  -- not found
 end
 
 -- Check version
-if tonumber(current_version) ~= expected_version then
+if tonumber(current[1]) ~= expected_version then
     return 1  -- version conflict
 end
 
--- Update version field
-redis.call('HSET', key, 'version', new_version)
+local old_status = current[2]
+
+-- Update all hash fields (passed as field/value pairs starting from ARGV[7])
+local field_count = (#ARGV - 6) / 2
+if field_count > 0 then
+    local hset_args = {}
+    for i = 7, #ARGV, 2 do
+        hset_args[#hset_args + 1] = ARGV[i]
+        hset_args[#hset_args + 1] = ARGV[i + 1]
+    end
+    redis.call('HSET', key, unpack(hset_args))
+end
+
+-- Update status index if changed
+if old_status ~= new_status then
+    if old_status and old_status ~= '' then
+        redis.call('SREM', status_prefix .. old_status, saga_id)
+    end
+    redis.call('SADD', status_prefix .. new_status, saga_id)
+end
+
+-- Set TTL for completed sagas
+if ttl > 0 then
+    redis.call('EXPIRE', key, ttl)
+end
+
 return 0  -- success
 `)
 
@@ -317,6 +362,9 @@ return 0  -- success
 // The update uses the Version field for optimistic locking. If the version
 // in Redis doesn't match the expected version, ErrVersionConflict is returned.
 // On successful update, the state's Version is incremented.
+//
+// The entire operation (version check, state update, and status index update)
+// is performed atomically using a Lua script to prevent TOCTOU races.
 func (s *RedisStore) Update(ctx context.Context, state *State) error {
 	if state == nil {
 		return fmt.Errorf("state is nil")
@@ -328,49 +376,60 @@ func (s *RedisStore) Update(ctx context.Context, state *State) error {
 	key := s.prefix + state.ID
 	newVersion := state.Version + 1
 
-	// Get old status for index update
-	oldStatus, err := s.client.HGet(ctx, key, "status").Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("hget: %w", err)
+	// Marshal fields for the Lua script
+	completedSteps, err := json.Marshal(state.CompletedSteps)
+	if err != nil {
+		return fmt.Errorf("marshal completed_steps: %w", err)
+	}
+	data, err := json.Marshal(state.Data)
+	if err != nil {
+		return fmt.Errorf("marshal data: %w", err)
 	}
 
-	// Use Lua script for atomic version check
-	result, err := updateScript.Run(ctx, s.client, []string{key}, state.Version, newVersion).Int()
+	// Build field/value pairs for HSET
+	fieldPairs := []any{
+		"id", state.ID,
+		"name", state.Name,
+		"status", string(state.Status),
+		"current_step", state.CurrentStep,
+		"completed_steps", completedSteps,
+		"data", data,
+		"error", state.Error,
+		"started_at", state.StartedAt.Unix(),
+		"last_updated_at", state.LastUpdatedAt.Unix(),
+		"version", newVersion,
+	}
+
+	if state.CompletedAt != nil {
+		fieldPairs = append(fieldPairs, "completed_at", state.CompletedAt.Unix())
+	}
+
+	// Determine TTL
+	var ttlSeconds int64
+	if s.ttl > 0 && (state.Status == StatusCompleted || state.Status == StatusCompensated) {
+		ttlSeconds = int64(s.ttl.Seconds())
+	}
+
+	// Build script arguments: expected_version, new_version, new_status, saga_id, status_prefix, ttl, ...field_pairs
+	args := make([]any, 0, 6+len(fieldPairs))
+	args = append(args, state.Version, newVersion, string(state.Status), state.ID, s.statusPrefix, ttlSeconds)
+	args = append(args, fieldPairs...)
+
+	// Run atomic Lua script (only KEYS[1] is needed; status keys are built inside the script)
+	result, err := updateScript.Run(ctx, s.client, []string{key}, args...).Int()
 	if err != nil {
-		return fmt.Errorf("version check: %w", err)
+		return fmt.Errorf("update script: %w", err)
 	}
 
 	switch result {
 	case 1:
 		return ErrVersionConflict
 	case 2:
-		return fmt.Errorf("saga not found: %s", state.ID)
+		return eventerrors.NewNotFoundError("saga", state.ID)
 	}
 
-	// Update the version in state for subsequent saves
+	// Update local version on success
 	state.Version = newVersion
-
-	// Save new state (version already updated by script)
-	if err := s.saveState(ctx, key, state); err != nil {
-		return err
-	}
-
-	// Update status index if changed
-	if oldStatus != string(state.Status) {
-		if err := s.client.SRem(ctx, s.statusPrefix+oldStatus, state.ID).Err(); err != nil {
-			return fmt.Errorf("srem old status: %w", err)
-		}
-		if err := s.client.SAdd(ctx, s.statusPrefix+string(state.Status), state.ID).Err(); err != nil {
-			return fmt.Errorf("sadd new status: %w", err)
-		}
-	}
-
-	// Set TTL for completed sagas
-	if s.ttl > 0 && (state.Status == StatusCompleted || state.Status == StatusCompensated) {
-		if err := s.client.Expire(ctx, key, s.ttl).Err(); err != nil {
-			return fmt.Errorf("expire: %w", err)
-		}
-	}
 
 	return nil
 }

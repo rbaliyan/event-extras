@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/health"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -196,7 +197,7 @@ func (s *MongoStore) Get(ctx context.Context, id string) (*State, error) {
 	err := s.collection.FindOne(ctx, filter).Decode(&mongoState)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, fmt.Errorf("saga not found: %s", id)
+			return nil, eventerrors.NewNotFoundError("saga", id)
 		}
 		return nil, fmt.Errorf("find: %w", err)
 	}
@@ -247,7 +248,7 @@ func (s *MongoStore) Update(ctx context.Context, state *State) error {
 		if exists > 0 {
 			return ErrVersionConflict
 		}
-		return fmt.Errorf("saga not found: %s", state.ID)
+		return eventerrors.NewNotFoundError("saga", state.ID)
 	}
 
 	// Update local version on success
@@ -303,7 +304,7 @@ func (s *MongoStore) Delete(ctx context.Context, id string) error {
 	}
 
 	if result.DeletedCount == 0 {
-		return fmt.Errorf("saga not found: %s", id)
+		return eventerrors.NewNotFoundError("saga", id)
 	}
 
 	return nil

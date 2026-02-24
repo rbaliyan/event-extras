@@ -79,11 +79,11 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 		script: redis.NewScript(`
 			local key = KEYS[1]
 			local limit = tonumber(ARGV[1])
-			local window = tonumber(ARGV[2])
+			local windowMs = tonumber(ARGV[2])
 
 			local current = redis.call('INCR', key)
 			if current == 1 then
-				redis.call('EXPIRE', key, window)
+				redis.call('PEXPIRE', key, windowMs)
 			end
 
 			if current > limit then
@@ -99,7 +99,7 @@ func NewRedisLimiter(client redis.Cmdable, key string, limit int, window time.Du
 // Uses a Lua script for atomic increment and check. On Redis error,
 // returns true (fail open) to prevent blocking all requests.
 func (r *RedisLimiter) Allow(ctx context.Context) bool {
-	result, err := r.script.Run(ctx, r.client, []string{r.key}, r.limit, int(r.window.Seconds())).Int()
+	result, err := r.script.Run(ctx, r.client, []string{r.key}, r.limit, r.window.Milliseconds()).Int()
 	if err != nil {
 		// On error, allow the request (fail open)
 		return true
