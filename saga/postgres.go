@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/health"
 )
 
@@ -154,7 +155,7 @@ func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 	)
 
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("saga not found: %s", id)
+		return nil, eventerrors.NewNotFoundError("saga", id)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
@@ -232,7 +233,7 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 		if exists {
 			return ErrVersionConflict
 		}
-		return fmt.Errorf("saga not found: %s", state.ID)
+		return eventerrors.NewNotFoundError("saga", state.ID)
 	}
 
 	// Update local version on success
