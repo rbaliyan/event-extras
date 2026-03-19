@@ -4,7 +4,7 @@ go 1.25.8
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
-	github.com/lib/pq v1.11.2
+	github.com/lib/pq v1.12.0
 	github.com/rbaliyan/event/v3 v3.15.3
 	github.com/redis/go-redis/v9 v9.18.0
 	go.mongodb.org/mongo-driver/v2 v2.5.0
