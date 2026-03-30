@@ -100,6 +100,7 @@ func (s *PostgresStore) Create(ctx context.Context, state *State) error {
 		return fmt.Errorf("marshal data: %w", err)
 	}
 
+// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -127,6 +128,7 @@ func (s *PostgresStore) Create(ctx context.Context, state *State) error {
 }
 
 // Get retrieves saga state by ID
+// #nosec G201 -- table name is set at construction, not user input
 func (s *PostgresStore) Get(ctx context.Context, id string) (*State, error) {
 	query := fmt.Sprintf(`
 		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version
@@ -199,6 +201,7 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 	}
 
 	newVersion := state.Version + 1
+// #nosec G201 -- table name is set at construction, not user input
 
 	// Use optimistic locking: only update if version matches
 	query := fmt.Sprintf(`
@@ -229,7 +232,7 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 		// Check if saga exists to distinguish between not found and version conflict
 		var exists bool
 		checkQuery := fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE id = $1)", s.table)
-		_ = s.db.QueryRowContext(ctx, checkQuery, state.ID).Scan(&exists)
+		_ = s.db.QueryRowContext(ctx, checkQuery, state.ID).Scan(&exists) // #nosec G201 -- table name is set at construction, not user input
 		if exists {
 			return ErrVersionConflict
 		}
@@ -240,9 +243,11 @@ func (s *PostgresStore) Update(ctx context.Context, state *State) error {
 	state.Version = newVersion
 	return nil
 }
+// #nosec G201 -- table name is set at construction, not user input
 
 // List lists sagas matching the filter
 func (s *PostgresStore) List(ctx context.Context, filter StoreFilter) ([]*State, error) {
+	// #nosec G201 -- table name is set at construction, not user input
 	query := fmt.Sprintf(`
 		SELECT id, name, status, current_step, completed_steps, data, error, started_at, completed_at, last_updated_at, version
 		FROM %s
@@ -334,7 +339,7 @@ func (s *PostgresStore) List(ctx context.Context, filter StoreFilter) ([]*State,
 
 // DeleteOlderThan removes sagas older than the specified age
 func (s *PostgresStore) DeleteOlderThan(ctx context.Context, age time.Duration) (int64, error) {
-	query := fmt.Sprintf("DELETE FROM %s WHERE started_at < $1", s.table)
+	query := fmt.Sprintf("DELETE FROM %s WHERE started_at < $1", s.table) // #nosec G201 -- table name is set at construction, not user input
 
 	result, err := s.db.ExecContext(ctx, query, time.Now().Add(-age))
 	if err != nil {
@@ -360,7 +365,7 @@ func (s *PostgresStore) Health(ctx context.Context) *health.Result {
 
 	// Count total sagas
 	var count int64
-	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table)
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", s.table) // #nosec G201 -- table name is set at construction, not user input
 	if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
 		return &health.Result{
 			Status:    health.StatusDegraded,
@@ -372,7 +377,7 @@ func (s *PostgresStore) Health(ctx context.Context) *health.Result {
 
 	// Count by status
 	var pending, running, compensating int64
-	pendingQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE status = $1", s.table)
+	pendingQuery := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE status = $1", s.table) // #nosec G201 -- table name is set at construction, not user input
 	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusPending).Scan(&pending)
 	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusRunning).Scan(&running)
 	_ = s.db.QueryRowContext(ctx, pendingQuery, StatusCompensating).Scan(&compensating)
