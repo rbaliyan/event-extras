@@ -411,7 +411,8 @@ func (s *RedisStore) Update(ctx context.Context, state *State) error {
 	}
 
 	// Build script arguments: expected_version, new_version, new_status, saga_id, status_prefix, ttl, ...field_pairs
-	args := make([]any, 0, 6+len(fieldPairs))
+	// 6 fixed args + up to 22 field pairs (10 required pairs + 1 optional pair)
+	args := make([]any, 0, 28)
 	args = append(args, state.Version, newVersion, string(state.Status), state.ID, s.statusPrefix, ttlSeconds)
 	args = append(args, fieldPairs...)
 
