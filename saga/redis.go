@@ -541,6 +541,35 @@ func (s *RedisStore) DeleteOlderThan(ctx context.Context, age time.Duration) (in
 	return deleted, nil
 }
 
+// DeleteCompleted removes completed and compensated sagas older than the specified age.
+func (s *RedisStore) DeleteCompleted(ctx context.Context, age time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-age)
+
+	var ids []string
+	for _, status := range []Status{StatusCompleted, StatusCompensated} {
+		members, err := s.client.SMembers(ctx, s.statusPrefix+string(status)).Result()
+		if err != nil {
+			return 0, fmt.Errorf("smembers %s: %w", status, err)
+		}
+		ids = append(ids, members...)
+	}
+
+	var deleted int64
+	for _, id := range ids {
+		state, err := s.Get(ctx, id)
+		if err != nil {
+			continue
+		}
+		if state.CompletedAt != nil && state.CompletedAt.Before(cutoff) {
+			if err := s.Delete(ctx, id); err == nil {
+				deleted++
+			}
+		}
+	}
+
+	return deleted, nil
+}
+
 // GetFailed returns all failed sagas
 func (s *RedisStore) GetFailed(ctx context.Context, name string, limit int) ([]*State, error) {
 	filter := StoreFilter{
