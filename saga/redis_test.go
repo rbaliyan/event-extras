@@ -483,6 +483,62 @@ func TestRedisStore_TTL(t *testing.T) {
 	}
 }
 
+func TestRedisStore_DeleteCompleted(t *testing.T) {
+	_, store := newTestRedis(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	oldAt := now.Add(-48 * time.Hour)
+
+	// Old completed saga — should be deleted
+	oldCompleted := makeTestState("dc-old-completed", "test-saga", StatusCompleted)
+	oldCompleted.CompletedAt = &oldAt
+	if err := store.Create(ctx, oldCompleted); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Old compensated saga — should be deleted
+	oldCompensated := makeTestState("dc-old-compensated", "test-saga", StatusCompensated)
+	oldCompensated.CompletedAt = &oldAt
+	if err := store.Create(ctx, oldCompensated); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Recent completed — should NOT be deleted
+	recentCompleted := makeTestState("dc-recent-completed", "test-saga", StatusCompleted)
+	recentCompleted.CompletedAt = &now
+	if err := store.Create(ctx, recentCompleted); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Running saga (no CompletedAt) — should NOT be deleted
+	running := makeTestState("dc-running", "test-saga", StatusRunning)
+	if err := store.Create(ctx, running); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	deleted, err := store.DeleteCompleted(ctx, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("DeleteCompleted: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("expected 2 deleted, got %d", deleted)
+	}
+
+	if _, err := store.Get(ctx, "dc-old-completed"); !eventerrors.IsNotFound(err) {
+		t.Error("expected old completed saga to be deleted")
+	}
+	if _, err := store.Get(ctx, "dc-old-compensated"); !eventerrors.IsNotFound(err) {
+		t.Error("expected old compensated saga to be deleted")
+	}
+	if _, err := store.Get(ctx, "dc-recent-completed"); err != nil {
+		t.Errorf("expected recent completed saga to still exist: %v", err)
+	}
+	if _, err := store.Get(ctx, "dc-running"); err != nil {
+		t.Errorf("expected running saga to still exist: %v", err)
+	}
+}
+
 func TestRedisStore_Health(t *testing.T) {
 	_, store := newTestRedis(t)
 	ctx := context.Background()
