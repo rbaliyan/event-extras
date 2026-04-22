@@ -40,10 +40,10 @@ import "github.com/rbaliyan/event-extras/ratelimit"
 limiter := ratelimit.NewTokenBucket(100, 10)
 
 // Distributed rate limiter using Redis
-limiter := ratelimit.NewRedisLimiter(redisClient, "my-service", 100, time.Second)
+limiter, err := ratelimit.NewRedisLimiter(redisClient, "my-service", 100, time.Second)
 
 // Sliding window for more accurate limiting
-limiter := ratelimit.NewSlidingWindowLimiter(redisClient, "my-service", 100, time.Second)
+limiter, err := ratelimit.NewSlidingWindowLimiter(redisClient, "my-service", 100, time.Second)
 
 // Blocking wait
 if err := limiter.Wait(ctx); err != nil {
@@ -119,23 +119,29 @@ func (s *CreateOrderStep) Compensate(ctx context.Context, data any) error {
 #### Creating a Saga
 
 ```go
-// Create saga with steps
-orderSaga := saga.New("order-creation",
-    &CreateOrderStep{},
-    &ReserveInventoryStep{},
-    &ChargePaymentStep{},
-).
-    WithStore(store).
-    WithBackoff(&backoff.Exponential{
+// Create saga with steps and options
+recorder := saga.NewMetricsRecorder("myapp")
+orderSaga, err := saga.New("order-creation",
+    []saga.Step{
+        &CreateOrderStep{},
+        &ReserveInventoryStep{},
+        &ChargePaymentStep{},
+    },
+    saga.WithStore(store),
+    saga.WithBackoff(&backoff.Exponential{
         Initial:    100 * time.Millisecond,
         Multiplier: 2.0,
         Max:        5 * time.Second,
-    }).
-    WithMaxRetries(3).
-    WithMetrics(metrics)
+    }),
+    saga.WithMaxRetries(3),
+    saga.WithMetrics(recorder),
+)
+if err != nil {
+    log.Fatal(err)
+}
 
 // Execute saga
-err := orderSaga.Execute(ctx, sagaID, &Order{...})
+err = orderSaga.Execute(ctx, sagaID, &Order{...})
 ```
 
 #### Saga Status Flow
@@ -172,18 +178,21 @@ type Store interface {
 
 ```go
 // Redis
-store := saga.NewRedisStore(redisClient).
-    WithKeyPrefix("sagas:").
-    WithTTL(7 * 24 * time.Hour)
+store, err := saga.NewRedisStore(redisClient,
+    saga.WithKeyPrefix("sagas:"),
+    saga.WithTTL(7*24*time.Hour),
+)
 
 // MongoDB
-store := saga.NewMongoStore(db).
-    WithCollection("sagas")
+store, err := saga.NewMongoStore(db,
+    saga.WithCollection("sagas"),
+)
 store.EnsureIndexes(ctx)
 
 // PostgreSQL
-store := saga.NewPostgresStore(db).
-    WithTable("sagas")
+store, err := saga.NewPostgresStore(db,
+    saga.WithTable("sagas"),
+)
 store.EnsureTable(ctx)
 ```
 
@@ -202,20 +211,18 @@ result := store.Health(ctx)
 OpenTelemetry metrics for saga execution:
 
 ```go
-metrics, _ := saga.NewMetrics(
-    saga.WithMeterProvider(provider),
-    saga.WithMetricsNamespace("orders"),
-)
+recorder := saga.NewMetricsRecorder("myapp")
 
-orderSaga := saga.New("order-creation", steps...).
-    WithMetrics(metrics)
+orderSaga, err := saga.New("order-creation", steps,
+    saga.WithMetrics(recorder),
+)
 ```
 
 Available metrics:
 - `saga_executions_total` - Counter by status (completed, compensated, failed)
 - `saga_execution_duration_seconds` - Histogram of execution time
 - `saga_step_duration_seconds` - Histogram of step execution time
-- `saga_retries_total` - Counter of retry attempts
+- `saga_compensation_steps_total` - Counter of compensation step executions
 
 #### Saga State
 

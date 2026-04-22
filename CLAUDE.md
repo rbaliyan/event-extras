@@ -31,9 +31,9 @@ Rate limiting implementations for controlling event processing rates:
 **Key Interfaces:**
 ```go
 type Limiter interface {
-    Allow() bool                              // Check and consume one token
+    Allow(ctx context.Context) bool           // Check and consume one token
     Wait(ctx context.Context) error           // Block until token available
-    Reserve() Reservation                      // Reserve a token for future use
+    Reserve(ctx context.Context) Reservation  // Reserve a token for future use
 }
 
 type Reservation interface {
