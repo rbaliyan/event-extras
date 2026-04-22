@@ -23,8 +23,9 @@ import (
 // Example:
 //
 //	recorder := saga.NewMetricsRecorder("myapp")
-//	orderSaga := saga.New("order-creation", steps...).
-//	    WithMetrics(recorder)
+//	orderSaga, err := saga.New("order-creation", steps,
+//	    saga.WithMetrics(recorder),
+//	)
 type MetricsRecorder struct {
 	meterName string
 	meter     metric.Meter
