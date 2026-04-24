@@ -1,21 +1,31 @@
 // Package http provides a read-oriented REST handler for inspecting saga state.
 //
-// Mount the handler at any prefix; it registers routes under /v1/sagas:
+// There are two ways to mount the handler.
+//
+// Direct handler (own sub-tree):
 //
 //	h := sagahttp.New(store)
-//	mux.Handle("/v1/sagas/", h)  // or any router that strips the prefix
+//	// Register on both the trailing-slash and bare-prefix form so Go's ServeMux
+//	// does not 307-redirect "/v1/sagas" and strand the child routes.
+//	mux.Handle("/v1/sagas", h)
+//	mux.Handle("/v1/sagas/", h)
+//
+// Route registration (share the parent mux):
+//
+//	h := sagahttp.New(store)
+//	h.RegisterRoutes(mux)  // registers all /v1/sagas[/...] patterns directly
 //
 // Endpoints:
 //
-//	GET  /v1/sagas              — list sagas (?name=, &status=, &limit=)
-//	GET  /v1/sagas/stats        — counts by status
-//	GET  /v1/sagas/{id}         — single saga detail
-//	DELETE /v1/sagas/{id}       — delete saga (only if store implements Deleter)
+//	GET    /v1/sagas             — list sagas (?name=, &status=, &limit=)
+//	GET    /v1/sagas/stats       — counts by status
+//	GET    /v1/sagas/{id}        — single saga detail
+//	DELETE /v1/sagas/{id}        — delete saga (only if store implements saga.Deleter)
 package http
 
 import (
-	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -23,40 +33,95 @@ import (
 	"github.com/rbaliyan/event-extras/saga"
 )
 
+// defaultListLimit is the default page size for list responses when no limit
+// is supplied via ?limit=.
 const defaultListLimit = 50
 
-// Deleter is an optional interface for saga stores that support deletion.
-// If the store implements Deleter, DELETE /v1/sagas/{id} is enabled;
-// otherwise it returns 405 Method Not Allowed.
-type Deleter interface {
-	Delete(ctx context.Context, id string) error
-}
+// statsFallbackCap bounds the List call used when the store does not
+// implement saga.Aggregator. Above this cap the handler refuses to scan
+// further and reports truncation in the response body so operators do not
+// silently get a misleading total.
+const statsFallbackCap = 10_000
+
+// Deleter is an alias preserved for backward compatibility with callers that
+// may have depended on the http-layer name.
+//
+// Deprecated: use saga.Deleter — the canonical location is the saga package
+// so other transports (e.g. gRPC) can share the same capability interface.
+type Deleter = saga.Deleter
 
 // Handler is an HTTP handler that exposes saga state as a REST API.
+//
+// Handler is safe for concurrent use. All state beyond immutable configuration
+// lives in the underlying store.
 type Handler struct {
-	store saga.Store
-	mux   *http.ServeMux
+	store  saga.Store
+	mux    *http.ServeMux
+	logger *slog.Logger
+}
+
+// Option configures a Handler.
+type Option func(*handlerOptions)
+
+type handlerOptions struct {
+	logger *slog.Logger
+}
+
+// WithLogger sets a custom logger. A nil logger is ignored; the default is
+// slog.Default() scoped with component=saga.http.
+func WithLogger(logger *slog.Logger) Option {
+	return func(o *handlerOptions) {
+		if logger != nil {
+			o.logger = logger
+		}
+	}
 }
 
 // New creates a Handler backed by the given store.
-func New(store saga.Store) *Handler {
-	h := &Handler{store: store}
+//
+// Deletion support is advertised as 405 Method Not Allowed when the store
+// does not implement saga.Deleter, and /stats falls back to a capped List
+// when the store does not implement saga.Aggregator.
+func New(store saga.Store, opts ...Option) *Handler {
+	o := &handlerOptions{
+		logger: slog.Default().With("component", "saga.http"),
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+
+	h := &Handler{
+		store:  store,
+		logger: o.logger,
+	}
 	mux := http.NewServeMux()
-	// /stats must be registered before /{id} — more specific exact match wins.
-	mux.HandleFunc("GET /v1/sagas/stats", h.stats)
-	mux.HandleFunc("GET /v1/sagas/{id}", h.get)
-	mux.HandleFunc("DELETE /v1/sagas/{id}", h.delete)
-	mux.HandleFunc("GET /v1/sagas", h.list)
+	h.RegisterRoutes(mux)
 	h.mux = mux
 	return h
 }
 
+// RegisterRoutes registers the handler's routes on the supplied mux.
+//
+// Use this when you want the /v1/sagas routes on a parent mux directly,
+// avoiding the 307 trailing-slash redirect that occurs when the handler is
+// mounted as a sub-tree via mux.Handle("/v1/sagas/", h).
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
+	// Go 1.22+ ServeMux picks the most specific pattern regardless of
+	// registration order — see https://pkg.go.dev/net/http#ServeMux.
+	mux.HandleFunc("GET /v1/sagas", h.list)
+	mux.HandleFunc("GET /v1/sagas/stats", h.stats)
+	mux.HandleFunc("GET /v1/sagas/{id}", h.get)
+	mux.HandleFunc("DELETE /v1/sagas/{id}", h.deleteSaga)
+}
+
+// ServeHTTP dispatches requests via the internal mux built in New.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
 // list handles GET /v1/sagas.
 // Query params: name (string), status (repeatable), limit (int, default 50).
+// Non-numeric, zero, and negative limits fall back to the default.
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -78,7 +143,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 
 	states, err := h.store.List(r.Context(), filter)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
@@ -87,23 +152,69 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		views[i] = fromState(s)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	h.writeJSON(w, http.StatusOK, map[string]any{
 		"sagas": views,
 		"count": len(views),
 	})
 }
 
 // stats handles GET /v1/sagas/stats.
-// Returns total count and a breakdown by status.
+//
+// When the store implements saga.Aggregator, stats delegates to a single
+// backend-native aggregation query. Otherwise it falls back to a capped
+// List; if the cap is reached the response includes "truncated": true so
+// operators know the total is a lower bound.
 func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
-	// A single unbounded List is fewer round-trips than one per status.
-	states, err := h.store.List(r.Context(), saga.StoreFilter{})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	counts := emptyStatusCounts()
+
+	if agg, ok := h.store.(saga.Aggregator); ok {
+		byStatus, err := agg.CountByStatus(r.Context())
+		if err != nil {
+			h.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		total := 0
+		for status, n := range byStatus {
+			counts[string(status)] = n
+			total += n
+		}
+		h.writeJSON(w, http.StatusOK, map[string]any{
+			"total":     total,
+			"by_status": counts,
+		})
 		return
 	}
 
-	counts := map[string]int{
+	// Fallback: capped scan. Cap+1 lets us detect truncation without a
+	// follow-up query.
+	states, err := h.store.List(r.Context(), saga.StoreFilter{Limit: statsFallbackCap + 1})
+	if err != nil {
+		h.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	truncated := len(states) > statsFallbackCap
+	if truncated {
+		states = states[:statsFallbackCap]
+	}
+	for _, s := range states {
+		counts[string(s.Status)]++
+	}
+
+	resp := map[string]any{
+		"total":     len(states),
+		"by_status": counts,
+	}
+	if truncated {
+		resp["truncated"] = true
+		resp["note"] = "store does not implement saga.Aggregator; counts truncated at fallback cap"
+	}
+	h.writeJSON(w, http.StatusOK, resp)
+}
+
+// emptyStatusCounts returns a status->count map seeded with every known
+// status at zero so clients see a stable shape.
+func emptyStatusCounts() map[string]int {
+	return map[string]int{
 		string(saga.StatusPending):      0,
 		string(saga.StatusRunning):      0,
 		string(saga.StatusCompleted):    0,
@@ -111,14 +222,6 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		string(saga.StatusCompensating): 0,
 		string(saga.StatusCompensated):  0,
 	}
-	for _, s := range states {
-		counts[string(s.Status)]++
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"total":     len(states),
-		"by_status": counts,
-	})
 }
 
 // get handles GET /v1/sagas/{id}.
@@ -127,30 +230,32 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request) {
 	state, err := h.store.Get(r.Context(), id)
 	if err != nil {
 		if saga.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "saga not found: "+id)
+			h.writeError(w, http.StatusNotFound, "saga not found: "+id)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, fromState(state))
+	h.writeJSON(w, http.StatusOK, fromState(state))
 }
 
-// delete handles DELETE /v1/sagas/{id}.
-// Returns 405 if the store does not implement Deleter.
-func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.store.(Deleter)
+// deleteSaga handles DELETE /v1/sagas/{id}.
+// Returns 405 if the store does not implement saga.Deleter.
+//
+// The method is named deleteSaga (not delete) to avoid shadowing the builtin.
+func (h *Handler) deleteSaga(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.store.(saga.Deleter)
 	if !ok {
-		writeError(w, http.StatusMethodNotAllowed, "store does not support deletion")
+		h.writeError(w, http.StatusMethodNotAllowed, "store does not support deletion")
 		return
 	}
 	id := r.PathValue("id")
 	if err := d.Delete(r.Context(), id); err != nil {
 		if saga.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "saga not found: "+id)
+			h.writeError(w, http.StatusNotFound, "saga not found: "+id)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		h.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -191,17 +296,30 @@ func fromState(s *saga.State) sagaView {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
+// writeJSON marshals v and writes it with the given status code.
+// On marshal failure, it logs the error and writes a plain 500 so the operator
+// has visibility instead of a silent empty body.
+func (h *Handler) writeJSON(w http.ResponseWriter, code int, v any) {
 	b, err := json.Marshal(v)
 	if err != nil {
+		h.logger.Error("saga.http: marshal response",
+			"error", err,
+			"status", code)
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal server error"}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	_, _ = w.Write(b)
+	if _, err := w.Write(b); err != nil {
+		h.logger.Warn("saga.http: write response", "error", err)
+	}
 }
 
-func writeError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+func (h *Handler) writeError(w http.ResponseWriter, code int, msg string) {
+	h.writeJSON(w, code, map[string]string{"error": msg})
 }
+
+// Compile-time check that Handler satisfies http.Handler.
+var _ http.Handler = (*Handler)(nil)

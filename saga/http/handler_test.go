@@ -1,10 +1,15 @@
 package http_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -297,9 +302,227 @@ func TestList_ResponseFields(t *testing.T) {
 // readOnlyStore is a minimal Store that does not implement Deleter.
 type readOnlyStore struct{}
 
-func (*readOnlyStore) Create(_ context.Context, _ *saga.State) error              { return nil }
-func (*readOnlyStore) Get(_ context.Context, _ string) (*saga.State, error)       { return nil, nil }
-func (*readOnlyStore) Update(_ context.Context, _ *saga.State) error              { return nil }
+func (*readOnlyStore) Create(_ context.Context, _ *saga.State) error        { return nil }
+func (*readOnlyStore) Get(_ context.Context, _ string) (*saga.State, error) { return nil, nil }
+func (*readOnlyStore) Update(_ context.Context, _ *saga.State) error        { return nil }
 func (*readOnlyStore) List(_ context.Context, _ saga.StoreFilter) ([]*saga.State, error) {
 	return nil, nil
 }
+
+// TestList_LimitEdgeCases verifies the limit query param is robust to bad input.
+// Negative, zero, non-numeric, and empty values all fall back to the default.
+func TestList_LimitEdgeCases(t *testing.T) {
+	h, store := newHandler(t)
+	for i := 0; i < 10; i++ {
+		seedSaga(t, store, fmt.Sprintf("s%d", i), "n", saga.StatusRunning)
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		want  int // expected count in response
+	}{
+		{"negative", "?limit=-5", 10},
+		{"zero", "?limit=0", 10},
+		{"nonnumeric", "?limit=abc", 10},
+		{"empty", "?limit=", 10},
+		{"explicit_small", "?limit=3", 3},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := do(t, h, http.MethodGet, "/v1/sagas"+tc.query)
+			if w.Code != http.StatusOK {
+				t.Fatalf("want 200, got %d", w.Code)
+			}
+			var result struct {
+				Count int `json:"count"`
+			}
+			decodeJSON(t, w, &result)
+			if result.Count != tc.want {
+				t.Errorf("count: want %d, got %d", tc.want, result.Count)
+			}
+		})
+	}
+}
+
+// TestList_RepeatableStatus verifies multiple ?status= values OR together.
+func TestList_RepeatableStatus(t *testing.T) {
+	h, store := newHandler(t)
+	seedSaga(t, store, "s1", "n", saga.StatusRunning)
+	seedSaga(t, store, "s2", "n", saga.StatusFailed)
+	seedSaga(t, store, "s3", "n", saga.StatusCompleted)
+
+	w := do(t, h, http.MethodGet, "/v1/sagas?status=running&status=failed")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var result struct {
+		Sagas []struct {
+			Status string `json:"status"`
+		} `json:"sagas"`
+		Count int `json:"count"`
+	}
+	decodeJSON(t, w, &result)
+	if result.Count != 2 {
+		t.Errorf("want count=2, got %d", result.Count)
+	}
+	seen := map[string]bool{}
+	for _, s := range result.Sagas {
+		seen[s.Status] = true
+	}
+	if !seen["running"] || !seen["failed"] {
+		t.Errorf("want both running and failed; got %v", seen)
+	}
+}
+
+// aggStore wraps MemoryStore and records whether CountByStatus was called,
+// so the test can verify Aggregator delegation without hitting List.
+type aggStore struct {
+	*saga.MemoryStore
+	called  atomic.Int32
+	counts  map[saga.Status]int
+	failErr error
+}
+
+func (a *aggStore) CountByStatus(_ context.Context) (map[saga.Status]int, error) {
+	a.called.Add(1)
+	if a.failErr != nil {
+		return nil, a.failErr
+	}
+	return a.counts, nil
+}
+
+// TestStats_UsesAggregator verifies stats delegates to CountByStatus when
+// the store implements saga.Aggregator, avoiding the List scan.
+func TestStats_UsesAggregator(t *testing.T) {
+	agg := &aggStore{
+		MemoryStore: saga.NewMemoryStore(),
+		counts: map[saga.Status]int{
+			saga.StatusRunning:   7,
+			saga.StatusCompleted: 3,
+		},
+	}
+	h := sagahttp.New(agg)
+
+	w := do(t, h, http.MethodGet, "/v1/sagas/stats")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if agg.called.Load() != 1 {
+		t.Fatalf("CountByStatus should have been called exactly once, got %d", agg.called.Load())
+	}
+
+	var result struct {
+		Total    int            `json:"total"`
+		ByStatus map[string]int `json:"by_status"`
+	}
+	decodeJSON(t, w, &result)
+	if result.Total != 10 {
+		t.Errorf("total: want 10, got %d", result.Total)
+	}
+	if result.ByStatus["running"] != 7 {
+		t.Errorf("running: want 7, got %d", result.ByStatus["running"])
+	}
+	if result.ByStatus["completed"] != 3 {
+		t.Errorf("completed: want 3, got %d", result.ByStatus["completed"])
+	}
+	// Statuses not returned by the aggregator should still be zero-filled.
+	if _, ok := result.ByStatus["pending"]; !ok {
+		t.Errorf("pending should be present with zero count, got %v", result.ByStatus)
+	}
+}
+
+// TestStats_AggregatorError propagates the backend error as a 500.
+func TestStats_AggregatorError(t *testing.T) {
+	agg := &aggStore{
+		MemoryStore: saga.NewMemoryStore(),
+		failErr:     errors.New("backend down"),
+	}
+	h := sagahttp.New(agg)
+
+	w := do(t, h, http.MethodGet, "/v1/sagas/stats")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", w.Code)
+	}
+}
+
+// TestStats_FallbackWhenNoAggregator verifies stats falls back to List for
+// stores that do not implement saga.Aggregator (MemoryStore does not).
+func TestStats_FallbackWhenNoAggregator(t *testing.T) {
+	// MemoryStore satisfies Deleter but not Aggregator.
+	h, store := newHandler(t)
+	seedSaga(t, store, "s1", "n", saga.StatusRunning)
+	seedSaga(t, store, "s2", "n", saga.StatusRunning)
+
+	w := do(t, h, http.MethodGet, "/v1/sagas/stats")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	var result struct {
+		Total     int            `json:"total"`
+		ByStatus  map[string]int `json:"by_status"`
+		Truncated bool           `json:"truncated"`
+	}
+	decodeJSON(t, w, &result)
+	if result.Total != 2 {
+		t.Errorf("total: want 2, got %d", result.Total)
+	}
+	if result.ByStatus["running"] != 2 {
+		t.Errorf("running: want 2, got %d", result.ByStatus["running"])
+	}
+	if result.Truncated {
+		t.Errorf("should not be truncated at only 2 rows")
+	}
+}
+
+// TestRegisterRoutes lets callers register directly on their parent mux and
+// avoid the 307 trailing-slash redirect that would otherwise strand /v1/sagas.
+func TestRegisterRoutes(t *testing.T) {
+	store := saga.NewMemoryStore()
+	seedSaga(t, store, "s1", "order.create", saga.StatusCompleted)
+
+	parent := http.NewServeMux()
+	h := sagahttp.New(store)
+	h.RegisterRoutes(parent)
+
+	// Exact prefix (no trailing slash) must serve list — not redirect.
+	w := do(t, parent, http.MethodGet, "/v1/sagas")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list: want 200, got %d (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Single-saga GET works too.
+	w = do(t, parent, http.MethodGet, "/v1/sagas/s1")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get: want 200, got %d", w.Code)
+	}
+}
+
+// TestWithLogger verifies the option is accepted and applied. Log-output
+// assertions for the marshal-error path live in handler_internal_test.go
+// (in-package) where writeJSON is reachable directly.
+func TestWithLogger(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	store := saga.NewMemoryStore()
+	h := sagahttp.New(store, sagahttp.WithLogger(logger))
+
+	w := do(t, h, http.MethodGet, "/v1/sagas")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+}
+
+// TestWithLogger_NilIgnored confirms a nil logger option does not clear the
+// default — the handler must still produce a non-nil logger internally.
+func TestWithLogger_NilIgnored(t *testing.T) {
+	store := saga.NewMemoryStore()
+	h := sagahttp.New(store, sagahttp.WithLogger(nil))
+
+	w := do(t, h, http.MethodGet, "/v1/sagas")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+}
+
