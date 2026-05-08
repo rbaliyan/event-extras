@@ -1,6 +1,6 @@
 module github.com/rbaliyan/event-extras
 
-go 1.25.9
+go 1.26.3
 
 require (
 	github.com/alicebob/miniredis/v2 v2.37.0
