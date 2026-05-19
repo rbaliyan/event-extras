@@ -54,6 +54,38 @@ func TestPostgresStore_Contract(t *testing.T) {
 	runStoreContractTests(t, store)
 }
 
+func TestPostgresStore_Health(t *testing.T) {
+	store := newPostgresTestStore(t)
+	ctx := context.Background()
+
+	// Seed one entry per state so the per-state counts are non-zero.
+	if _, err := store.Acquire(ctx, "h-run", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Acquire(ctx, "h-done", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(ctx, "h-done", "pod-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Acquire(ctx, "h-failed", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Fail(ctx, "h-failed", "pod-a", "boom", false); err != nil {
+		t.Fatal(err)
+	}
+
+	res := store.Health(ctx)
+	if string(res.Status) != "healthy" {
+		t.Fatalf("expected healthy, got %q (msg=%q)", res.Status, res.Message)
+	}
+	for _, k := range []string{"running", "completed", "failed", "table"} {
+		if _, ok := res.Details[k]; !ok {
+			t.Fatalf("expected detail %q, got %v", k, res.Details)
+		}
+	}
+}
+
 func TestPostgresStore_LeaseExpiry(t *testing.T) {
 	store := newPostgresTestStore(t)
 	ctx := context.Background()

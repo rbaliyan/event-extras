@@ -51,6 +51,31 @@ func TestMongoStore_Contract(t *testing.T) {
 	runStoreContractTests(t, store)
 }
 
+func TestMongoStore_Health(t *testing.T) {
+	store := newMongoIntegrationStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Acquire(ctx, "h-run", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Acquire(ctx, "h-done", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Complete(ctx, "h-done", "pod-a"); err != nil {
+		t.Fatal(err)
+	}
+
+	res := store.Health(ctx)
+	if string(res.Status) != "healthy" {
+		t.Fatalf("expected healthy, got %q (msg=%q)", res.Status, res.Message)
+	}
+	for _, k := range []string{"running", "completed", "failed", "collection"} {
+		if _, ok := res.Details[k]; !ok {
+			t.Fatalf("expected detail %q, got %v", k, res.Details)
+		}
+	}
+}
+
 func TestMongoStore_LeaseExpiry(t *testing.T) {
 	store := newMongoIntegrationStore(t)
 	ctx := context.Background()

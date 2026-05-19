@@ -52,6 +52,17 @@ func TestRedisStore_ContractIntegration(t *testing.T) {
 	runStoreContractTests(t, store)
 }
 
+func TestRedisStore_HealthIntegration(t *testing.T) {
+	store := newRedisIntegrationStore(t)
+	res := store.Health(context.Background())
+	if string(res.Status) != "healthy" {
+		t.Fatalf("expected healthy, got %q (msg=%q)", res.Status, res.Message)
+	}
+	if _, ok := res.Details["prefix"]; !ok {
+		t.Fatalf("expected prefix detail, got %v", res.Details)
+	}
+}
+
 func TestRedisStore_LeaseExpiry(t *testing.T) {
 	store := newRedisIntegrationStore(t)
 	ctx := context.Background()

@@ -415,3 +415,77 @@ type completeFailingStore struct {
 func (c *completeFailingStore) Complete(context.Context, string, string) error {
 	return c.completeErr
 }
+
+func TestHook_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		hook    Hook
+		wantErr error
+	}{
+		{name: "valid_no_version", hook: Hook{Name: "migrate"}, wantErr: nil},
+		{name: "valid_with_version", hook: Hook{Name: "migrate", Version: "v1"}, wantErr: nil},
+		{name: "empty_name_rejected", hook: Hook{Name: "", Version: "v1"}, wantErr: errors.New("required")},
+		{name: "at_in_name_rejected", hook: Hook{Name: "bad@name"}, wantErr: ErrInvalidHookName},
+		{name: "at_in_name_with_version", hook: Hook{Name: "bad@name", Version: "v1"}, wantErr: ErrInvalidHookName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.hook.Validate()
+			switch {
+			case tc.wantErr == nil:
+				if err != nil {
+					t.Fatalf("expected nil, got %v", err)
+				}
+			case errors.Is(tc.wantErr, ErrInvalidHookName):
+				if !errors.Is(err, ErrInvalidHookName) {
+					t.Fatalf("expected ErrInvalidHookName, got %v", err)
+				}
+			default:
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+			}
+		})
+	}
+}
+
+func TestHook_Key(t *testing.T) {
+	cases := []struct {
+		name string
+		hook Hook
+		want string
+	}{
+		{name: "bare_when_version_empty", hook: Hook{Name: "migrate"}, want: "migrate"},
+		{name: "joined_when_version_set", hook: Hook{Name: "migrate", Version: "v1.2.3"}, want: "migrate@v1.2.3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.hook.Key(); got != tc.want {
+				t.Fatalf("Key() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedisStore_Health(t *testing.T) {
+	mr, store := newRedisTestStore(t)
+	ctx := context.Background()
+
+	res := store.Health(ctx)
+	if string(res.Status) != "healthy" {
+		t.Fatalf("expected healthy status, got %q (msg=%q)", res.Status, res.Message)
+	}
+	if res.Details["prefix"] != "lifecycle:" {
+		t.Fatalf("expected prefix in details, got %v", res.Details)
+	}
+
+	// Simulate Redis being unreachable.
+	mr.Close()
+	res = store.Health(ctx)
+	if string(res.Status) == "healthy" {
+		t.Fatalf("expected non-healthy status after closing redis, got %q", res.Status)
+	}
+	if res.Message == "" {
+		t.Fatalf("expected error message in unhealthy result")
+	}
+}
