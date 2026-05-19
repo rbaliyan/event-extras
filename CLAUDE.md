@@ -43,6 +43,58 @@ type Reservation interface {
 }
 ```
 
+#### lifecycle
+
+"Run exactly once per fleet" coordination for deployment-time hooks (schema migrations, cache warmup). Keyed by `{Hook.Name}@{Hook.Version}`; bumping the version makes the hook eligible to run again on the next rollout.
+
+**Core Components:**
+
+- `Hook`: `{Name, Version}` — `Name` must not contain `@` (validated by `Hook.Validate` and `Once`)
+- `Once(ctx, store, hook, fn, opts...) (Outcome, error)`: high-level entry point; winner runs `fn` with an auto-refreshing lease, others observe and skip
+- `Store`: persistence contract — `Acquire / Refresh / Complete / Fail / Get / Reset`
+- `Outcome` enum: `OutcomeRan`, `OutcomeSkippedRunning`, `OutcomeSkippedCompleted`, `OutcomeSkippedFailed`, `OutcomeFailed` (body errored or panicked), `OutcomeCompleteFailed` (body succeeded but bookkeeping write failed)
+- `State` enum: `StatePending`, `StateRunning`, `StateCompleted`, `StateFailed`
+- Sentinel errors: `ErrLeaseLost` (Refresh/Complete/Fail by non-holder or after own lease expiry), `ErrInvalidHookName`
+
+**Store Implementations:**
+- `MemoryStore`: in-process; tests/single-instance. Does NOT implement `health.Checker`.
+- `RedisStore`: atomic transitions via four Lua scripts (acquire, refresh, complete, fail); single HASH per hook. Implements `health.Checker` (PING).
+- `PostgresStore`: atomic via `SELECT ... FOR UPDATE` inside a ReadCommitted txn. `EnsureSchema` creates the table. Implements `health.Checker` (per-state counts).
+- `MongoStore`: atomic via `findOneAndUpdate` with `upsert=true`; duplicate-key collision triggers a follow-up `Get`. Implements `health.Checker`.
+
+**Clock semantics:**
+- `PostgresStore` compares `lease_until` against the database server's `NOW()` → robust to cross-pod clock skew.
+- Redis, Mongo, Memory compare against caller's `time.Now()`.
+
+**Options on Once:**
+- `WithInstanceID(id)`: defaults to `<hostname>:<pid>`. In K8s use `POD_NAME`.
+- `WithLease(d)`: default 60s.
+- `WithRefreshInterval(d)`: default `lease/3` with a 1-second floor.
+- `WithRetryable(bool)`: default `false`. `false` puts body errors into terminal `StateFailed` requiring manual `Reset` — safer for non-idempotent work. `true` releases the claim on body error for retry.
+- `WithLogger(*slog.Logger)`.
+
+**Behavioral guarantees:**
+- A panicking body is caught, recorded via `Fail`, and surfaces as `OutcomeFailed`. The claim is NOT leaked until lease expiry.
+- `Reset` is unconditional — calling it on a `running` entry silently yanks the lease from the live holder. Documented in `Store.Reset` godoc.
+- Lease loss during execution does not cancel the body; another instance may take over after lease expiry, and the first writer's `Complete` returns `ErrLeaseLost`.
+
+**Key Types:**
+```go
+type Hook struct {
+    Name    string
+    Version string
+}
+
+type Store interface {
+    Acquire(ctx, key, instanceID string, lease time.Duration) (Status, error)
+    Refresh(ctx, key, instanceID string, lease time.Duration) error
+    Complete(ctx, key, instanceID string) error
+    Fail(ctx, key, instanceID, errMsg string, retryable bool) error
+    Get(ctx, key string) (Status, error)
+    Reset(ctx, key string) error
+}
+```
+
 #### saga
 
 Saga pattern for distributed transactions with automatic compensation:
