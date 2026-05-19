@@ -241,6 +241,105 @@ type State struct {
 }
 ```
 
+### lifecycle
+
+Run-exactly-once-per-fleet coordination for deployment-time hooks (schema
+migrations, cache warmup, version-pinned bootstrap work). On rollout every
+pod calls `lifecycle.Once`; one wins the claim and runs the body, the rest
+observe and skip.
+
+```go
+import "github.com/rbaliyan/event-extras/lifecycle"
+```
+
+#### Basic Usage
+
+```go
+// Build/deployment version comes from your CI or the go-version library.
+hook := lifecycle.Hook{Name: "users-table-migration", Version: "v1.2.3"}
+
+outcome, err := lifecycle.Once(ctx, store, hook, func(ctx context.Context) error {
+    return runMigration(ctx, db)
+})
+if err != nil {
+    return err
+}
+
+switch outcome {
+case lifecycle.OutcomeRan:
+    log.Info("migration executed on this pod")
+case lifecycle.OutcomeSkippedCompleted:
+    log.Info("migration already completed for this version")
+case lifecycle.OutcomeSkippedRunning:
+    log.Info("another pod is running the migration")
+case lifecycle.OutcomeSkippedFailed:
+    log.Error("migration is in terminal failed state — manual intervention required")
+case lifecycle.OutcomeCompleteFailed:
+    log.Warn("body ran but bookkeeping write failed", "err", err)
+}
+```
+
+#### State Machine
+
+```
+(absent) -- Acquire ---------> running
+running  -- Complete --------> completed                 (terminal)
+running  -- Fail(retryable=false) --> failed             (terminal)
+running  -- Fail(retryable=true)  --> (key deleted; re-acquirable)
+running  -- lease expiry ----------> (takeover available via Acquire)
+```
+
+Completed and failed are terminal: subsequent `Acquire` calls observe and
+return without modifying state. Bumping the `Hook.Version` (or calling
+`Store.Reset`) is the only way to re-run a completed hook.
+
+#### Store Implementations
+
+| Store | Use Case | `health.Checker` |
+|-------|----------|------------------|
+| `MemoryStore` | Tests and single-instance deployments | — |
+| `RedisStore` | Production; atomic via Lua scripts | ✓ |
+| `PostgresStore` | Production; atomic via `SELECT ... FOR UPDATE` | ✓ |
+| `MongoStore` | Production; atomic via `findOneAndUpdate` + upsert | ✓ |
+
+#### Lease Semantics
+
+`Once` claims the hook with a 60-second lease by default and auto-refreshes
+at `lease/3` (1-second floor) while the body runs. If the holder crashes,
+the lease expires and another pod can take over via `Acquire` — at-most-
+once is preserved only as long as the holder refreshes; under crash recovery
+the body can run twice.
+
+Combine `WithRetryable(false)` (default) with idempotent body code for
+non-idempotent work like destructive migrations: the body's error pins the
+hook into terminal `StateFailed`, requiring manual `Store.Reset`. Use
+`WithRetryable(true)` only for bodies that are safe to run multiple times.
+
+`PostgresStore` compares `lease_until` against the database server's
+`NOW()` rather than the caller's wall clock, so it is robust to cross-pod
+clock skew greater than the lease duration. The other backends compare
+against the caller's clock.
+
+#### Store Setup
+
+```go
+// Redis — no bootstrap required
+store, _ := lifecycle.NewRedisStore(redisClient,
+    lifecycle.WithRedisPrefix("lifecycle:"),
+)
+
+// PostgreSQL — call EnsureSchema once at bootstrap
+store, _ := lifecycle.NewPostgresStore(db,
+    lifecycle.WithPostgresTable("lifecycle_hooks"),
+)
+store.EnsureSchema(ctx)
+
+// MongoDB — no bootstrap required (uses default _id index)
+store, _ := lifecycle.NewMongoStore(db,
+    lifecycle.WithMongoCollection("lifecycle_hooks"),
+)
+```
+
 ## Related Packages
 
 - [event](https://github.com/rbaliyan/event) - Core event pub-sub library
