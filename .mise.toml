@@ -1,5 +1,5 @@
 [tools]
-go = "1.26.3"
+go = "1.26.4"
 just = "latest"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
 "go:github.com/securego/gosec/v2/cmd/gosec" = "v2.25.0"
