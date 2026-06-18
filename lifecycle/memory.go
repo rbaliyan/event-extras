@@ -35,6 +35,15 @@ func NewMemoryStore() *MemoryStore {
 }
 
 // Acquire implements Store.
+//
+// Behavior summary (all under a single mutex):
+//   - completed/failed entry present -> return it unchanged
+//   - running by same instance       -> refresh lease, return running
+//   - running by other, lease valid  -> return running by other
+//   - running by other, lease expired -> take over: set running + new lease
+//   - no entry present                -> create: set running + new lease
+//
+// A lease is valid while now < leaseUntil and expired once now >= leaseUntil.
 func (s *MemoryStore) Acquire(_ context.Context, key, instanceID string, lease time.Duration) (Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -77,7 +86,9 @@ func (s *MemoryStore) Refresh(_ context.Context, key, instanceID string, lease t
 		return ErrLeaseLost
 	}
 	now := s.now()
-	if now.After(e.leaseUntil) {
+	// Expiry is exclusive: at now == leaseUntil the lease is already gone and
+	// Acquire may have handed it to another instance, so reject the refresh.
+	if !now.Before(e.leaseUntil) {
 		return ErrLeaseLost
 	}
 	e.leaseUntil = now.Add(lease)

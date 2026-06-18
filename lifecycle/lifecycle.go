@@ -54,11 +54,19 @@
 //   - PostgresStore — production-ready, atomic transitions via SELECT ... FOR UPDATE.
 //   - MongoStore — production-ready, atomic transitions via findOneAndUpdate + upsert.
 //
-// All three production backends implement health.Checker. MemoryStore does
-// not (there is nothing remote to check). Postgres compares lease_until
-// against the database server's NOW(); the other backends compare against
-// the caller's wall clock — under cross-pod clock skew Postgres therefore
-// gives stronger lease semantics.
+// The three production backends (RedisStore, PostgresStore, MongoStore) each
+// implement health.Checker. MemoryStore does not (there is nothing remote to
+// check). Postgres compares lease_until against the database server's NOW();
+// the other backends compare against the caller's wall clock — under cross-pod
+// clock skew Postgres therefore gives stronger lease semantics.
+//
+// # Lease expiry boundary
+//
+// lease_until is the exclusive instant of expiry: a lease is considered held
+// while now < lease_until and expired once now >= lease_until. Every backend
+// applies this rule consistently — at the exact boundary Acquire may take the
+// claim over and the prior holder's Refresh returns ErrLeaseLost, never both
+// succeeding.
 package lifecycle
 
 import (
@@ -172,12 +180,21 @@ func (h Hook) Key() string {
 // Status is a point-in-time snapshot of a hook's state in storage. When
 // State is StatePending the rest of the fields are zero-valued.
 type Status struct {
-	State       State
-	Holder      string    // instance ID of current/last holder
-	LeaseUntil  time.Time // when the current running lease expires
-	CompletedAt time.Time // set when State == StateCompleted
-	FailedAt    time.Time // set when State == StateFailed
-	Error       string    // set when State == StateFailed
+	// State is the current state of the hook key; StatePending when absent.
+	State State
+	// Holder is the instance ID that currently holds the running claim. It
+	// also remains set on a completed/failed entry, recording the instance
+	// that produced the terminal state. Empty when State == StatePending.
+	Holder string
+	// LeaseUntil is the exclusive instant at which the current running lease
+	// expires (held while now < LeaseUntil). Zero unless State == StateRunning.
+	LeaseUntil time.Time
+	// CompletedAt is set when State == StateCompleted.
+	CompletedAt time.Time
+	// FailedAt is set when State == StateFailed.
+	FailedAt time.Time
+	// Error is the body error message recorded when State == StateFailed.
+	Error string
 }
 
 // Store is the persistence contract for lifecycle hooks. Implementations
@@ -275,8 +292,10 @@ func WithLease(d time.Duration) Option {
 
 // WithRefreshInterval sets how often the auto-refresh goroutine extends
 // the lease while the body runs. Default is lease/3 with a 1-second floor
-// for very short leases. Set to lease (or longer) to disable mid-run
-// refresh — the body must then finish within a single lease window.
+// for very short leases. Set it longer than the lease to disable mid-run
+// refresh — the body must then finish within a single lease window. (Setting
+// it to exactly the lease is not a clean disable: the first tick lands on the
+// exclusive expiry boundary and is rejected as a lease loss.)
 func WithRefreshInterval(d time.Duration) Option {
 	return func(o *onceOptions) {
 		if d > 0 {
@@ -422,10 +441,23 @@ func runWithRecover(ctx context.Context, fn func(context.Context) error) (err er
 	return fn(ctx)
 }
 
+// refreshLoop extends the lease on a ticker while the body runs, returning
+// when the parent context is cancelled (normal stop) or the lease is lost.
+// A definitive ErrLeaseLost returns immediately. Transient refresh errors
+// are retried, but if they persist past the point where the lease can no
+// longer be valid locally (no successful refresh within a full lease window),
+// the lease is treated as lost and the loop gives up rather than logging the
+// same warning forever.
 func refreshLoop(ctx context.Context, store Store, key, instanceID string, lease, interval time.Duration, log *slog.Logger, done chan<- struct{}) {
 	defer close(done)
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	// leaseDeadline tracks when the lease last extended by a successful
+	// Refresh would lapse; the claim was just acquired with a full lease.
+	// Seeded from the local clock — a slight over-estimate versus a backend
+	// that stamps the lease with a server clock (Postgres), which only makes
+	// this give-up backstop marginally more lenient, never premature.
+	leaseDeadline := time.Now().Add(lease)
 	for {
 		select {
 		case <-ctx.Done():
@@ -436,13 +468,22 @@ func refreshLoop(ctx context.Context, store Store, key, instanceID string, lease
 			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interval)
 			err := store.Refresh(rctx, key, instanceID, lease)
 			cancel()
-			if err != nil {
-				if errors.Is(err, ErrLeaseLost) {
-					log.Error("lease lost during execution; body may run twice", "key", key)
-					return
-				}
-				log.Warn("lease refresh failed", "error", err)
+			if err == nil {
+				leaseDeadline = time.Now().Add(lease)
+				continue
 			}
+			if errors.Is(err, ErrLeaseLost) {
+				log.Error("lease lost during execution; body may run twice", "key", key)
+				return
+			}
+			if time.Now().After(leaseDeadline) {
+				// Transient errors have outlasted the lease window: the claim
+				// has certainly lapsed locally even though the backend never
+				// returned ErrLeaseLost. Treat it as lost and stop retrying.
+				log.Error("lease refresh failing past lease window; presuming lease lost, body may run twice", "key", key, "error", err)
+				return
+			}
+			log.Warn("lease refresh failed; will retry until lease window elapses", "error", err)
 		}
 	}
 }

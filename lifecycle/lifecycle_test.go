@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -210,6 +212,120 @@ func TestMemoryStore_ExpiredLeaseTransfers(t *testing.T) {
 	if s.Holder != "pod-b" {
 		t.Fatalf("expected pod-b to take over expired lease, got %+v", s)
 	}
+}
+
+func TestMemoryStore_RefreshAtExactExpiryFails(t *testing.T) {
+	store := NewMemoryStore()
+	base := time.Now()
+	store.now = func() time.Time { return base }
+	ctx := context.Background()
+
+	if _, err := store.Acquire(ctx, "k", "pod-a", 100*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	// Advance to the exact expiry instant. The lease boundary is exclusive, so
+	// the holder's own Refresh must fail and a takeover must be allowed — the
+	// two verdicts must never both succeed at now == leaseUntil.
+	store.now = func() time.Time { return base.Add(100 * time.Millisecond) }
+
+	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("refresh at exact expiry should fail with ErrLeaseLost, got %v", err)
+	}
+	s, err := store.Acquire(ctx, "k", "pod-b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Holder != "pod-b" {
+		t.Fatalf("expected pod-b to take over at exact expiry, got %+v", s)
+	}
+}
+
+// TestOnce_LeaseLostDuringExecution_Takeover drives a real lease expiry and
+// takeover end-to-end: while pod-a's body is still running, its lease expires
+// and pod-b claims the hook. This exercises refreshLoop's ErrLeaseLost branch
+// and the OutcomeCompleteFailed path where the original holder's Complete is
+// rejected because it no longer holds the claim.
+func TestOnce_LeaseLostDuringExecution_Takeover(t *testing.T) {
+	store := NewMemoryStore()
+	var mu sync.Mutex
+	nowVal := time.Now()
+	store.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return nowVal }
+	advance := func(d time.Duration) { mu.Lock(); nowVal = nowVal.Add(d); mu.Unlock() }
+
+	ctx := context.Background()
+	hook := Hook{Name: "migrate", Version: "v1"}
+
+	bodyStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+
+	var (
+		outcome Outcome
+		onceErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		outcome, onceErr = Once(ctx, store, hook, func(context.Context) error {
+			close(bodyStarted)
+			<-releaseBody
+			return nil
+		}, WithInstanceID("pod-a"), WithLease(50*time.Millisecond), WithRefreshInterval(5*time.Millisecond))
+		close(done)
+	}()
+
+	<-bodyStarted
+	// Expire pod-a's lease and let pod-b take it over while the body is blocked.
+	advance(time.Second)
+	s, err := store.Acquire(ctx, hook.Key(), "pod-b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Holder != "pod-b" {
+		t.Fatalf("pod-b should have taken over the expired lease, got %+v", s)
+	}
+	// Give the refresh loop a few ticks to observe the lost lease.
+	time.Sleep(30 * time.Millisecond)
+	close(releaseBody)
+	<-done
+
+	if outcome != OutcomeCompleteFailed {
+		t.Fatalf("expected OutcomeCompleteFailed after takeover, got %v", outcome)
+	}
+	if !errors.Is(onceErr, ErrLeaseLost) {
+		t.Fatalf("expected Complete to surface ErrLeaseLost, got %v", onceErr)
+	}
+}
+
+// TestRefreshLoop_GivesUpAfterLeaseWindowOnTransientErrors covers the
+// escalation branch: when Refresh keeps returning a non-sentinel (transient)
+// error past a full lease window, the loop presumes the lease lost and exits
+// on its own — without the parent context being cancelled.
+func TestRefreshLoop_GivesUpAfterLeaseWindowOnTransientErrors(t *testing.T) {
+	store := &refreshErrStore{Store: NewMemoryStore(), err: errors.New("transient blip")}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	done := make(chan struct{})
+
+	// Short lease so the deadline lapses quickly; shorter interval so ticks
+	// fire several times within the window. Parent context is never cancelled.
+	go refreshLoop(context.Background(), store, "k", "pod-a",
+		40*time.Millisecond, 10*time.Millisecond, log, done)
+
+	select {
+	case <-done:
+		// Loop gave up by itself — escalation branch exercised.
+	case <-time.After(2 * time.Second):
+		t.Fatal("refreshLoop did not give up after the lease window elapsed under persistent transient errors")
+	}
+}
+
+// refreshErrStore wraps a Store and makes Refresh always return a chosen
+// non-sentinel error; used to drive the transient give-up branch.
+type refreshErrStore struct {
+	Store
+	err error
+}
+
+func (s *refreshErrStore) Refresh(context.Context, string, string, time.Duration) error {
+	return s.err
 }
 
 func TestOnce_SingleInstance(t *testing.T) {

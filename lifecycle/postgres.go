@@ -250,6 +250,11 @@ func (s *PostgresStore) Reset(ctx context.Context, key string) error {
 }
 
 // Health implements health.Checker.
+//
+// A failed ping reports StatusUnhealthy. If the ping succeeds but the
+// per-state row counts cannot be read, it reports StatusDegraded (the
+// database is reachable but the state breakdown is unavailable). Otherwise it
+// reports StatusHealthy with running/completed/failed counts in Details.
 func (s *PostgresStore) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 	if err := s.db.PingContext(ctx); err != nil {

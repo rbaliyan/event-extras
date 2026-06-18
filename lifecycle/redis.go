@@ -273,7 +273,9 @@ local state = redis.call('HGET', key, 'state')
 local holder = redis.call('HGET', key, 'holder')
 local lease_until = tonumber(redis.call('HGET', key, 'lease_until_ms')) or 0
 
-if state ~= 'running' or holder ~= instance or now_ms > lease_until then
+-- Expiry is exclusive: at now_ms == lease_until the lease is already gone
+-- (Acquire would take it over), so reject the refresh to stay consistent.
+if state ~= 'running' or holder ~= instance or now_ms >= lease_until then
     return 0
 end
 
