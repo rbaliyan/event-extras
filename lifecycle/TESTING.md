@@ -58,6 +58,21 @@ and runs a 5-minute nightly campaign per target.
 
 Hand-authored regression seeds already live under `testdata/fuzz/`.
 
+## CI gating
+
+Every test type runs in CI and gates PRs to `main`:
+
+| Workflow | Jobs | Aggregate check |
+|----------|------|-----------------|
+| `ci.yml` | Build+Test (`-race`, no env → integration skips), Integration (redis/postgres/mongo service containers + reachability precheck + assert-not-skipped + 85% lifecycle coverage gate), Lint, CodeQL | **CI Gate** |
+| `fuzz.yml` | Per-target seed replay on PRs (20s) + 5-min nightly campaign | **Fuzz Gate** |
+| `bench.yml` | `-count=6` HEAD-vs-base regression gate (>15% ns/op or >20% B/op; CV-noisy benches skipped) | Benchmark regression gate |
+
+Branch protection on `main` requires the aggregate **CI Gate** and **Fuzz Gate**
+checks (each is green only when all of its underlying jobs pass), so adding or
+renaming a job tightens the gate without editing repo settings. The Integration
+job fails loudly rather than silently skipping when a backend is unreachable.
+
 ## Benchmarks
 
 ```bash
