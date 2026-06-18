@@ -9,6 +9,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   bench:
     name: Benchmark regression gate

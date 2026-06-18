@@ -9,6 +9,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   fuzz:
     name: Fuzz
@@ -57,3 +61,18 @@ jobs:
           name: fuzz-corpus-${{ matrix.target }}
           path: lifecycle/testdata/fuzz/
           if-no-files-found: ignore
+
+  # Aggregate gate so branch protection can require a single "Fuzz Gate" check
+  # covering every matrix target.
+  fuzz-gate:
+    name: Fuzz Gate
+    if: always()
+    needs: [fuzz]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all fuzz targets passed
+        env:
+          RESULT: ${{ needs.fuzz.result }}
+        run: |
+          echo "fuzz matrix result: $RESULT"
+          [ "$RESULT" = "success" ] || { echo "a fuzz target failed"; exit 1; }

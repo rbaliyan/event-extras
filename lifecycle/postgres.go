@@ -90,57 +90,84 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 // concurrent acquirers on the same hook_key. After locking the row (or
 // observing its absence), the method applies the same state-machine rules
 // as the memory and Redis stores.
+//
+// SELECT ... FOR UPDATE cannot lock a row that does not exist yet, so the
+// first-insert case is racy: concurrent acquirers all observe "no row". The
+// insert therefore uses ON CONFLICT DO NOTHING and, on a lost race, re-reads
+// the now-present row instead of surfacing a duplicate-key error. A bounded
+// retry covers the rare case where the row is deleted again in between.
 func (s *PostgresStore) Acquire(ctx context.Context, key, instanceID string, lease time.Duration) (Status, error) {
-	var status Status
-	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		row, ok, err := s.selectForUpdate(ctx, tx, key)
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		newLease := now.Add(lease)
-
-		if !ok {
-			// No row: insert running.
-			if err := s.insertRunning(ctx, tx, key, instanceID, newLease); err != nil {
+	const maxAttempts = 5
+	for attempt := 0; ; attempt++ {
+		var status Status
+		retry := false
+		err := s.withTx(ctx, func(tx *sql.Tx) error {
+			row, ok, err := s.selectForUpdate(ctx, tx, key)
+			if err != nil {
 				return err
 			}
-			status = Status{State: StateRunning, Holder: instanceID, LeaseUntil: newLease}
-			return nil
-		}
+			now := time.Now()
+			newLease := now.Add(lease)
 
-		switch row.State {
-		case StateCompleted, StateFailed:
-			status = row
-			return nil
-		case StateRunning:
-			if row.Holder == instanceID {
-				if err := s.updateLease(ctx, tx, key, newLease); err != nil {
+			if !ok {
+				inserted, err := s.insertRunningIfAbsent(ctx, tx, key, instanceID, newLease)
+				if err != nil {
 					return err
 				}
-				row.LeaseUntil = newLease
+				if inserted {
+					status = Status{State: StateRunning, Holder: instanceID, LeaseUntil: newLease}
+					return nil
+				}
+				// Lost the insert race to a concurrent acquirer; re-read the
+				// row that is now present and apply the normal state machine.
+				row, ok, err = s.selectForUpdate(ctx, tx, key)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					// Row vanished again (concurrent retryable Fail/Reset);
+					// retry the whole transaction.
+					retry = true
+					return nil
+				}
+			}
+
+			switch row.State {
+			case StateCompleted, StateFailed:
 				status = row
 				return nil
-			}
-			if now.Before(row.LeaseUntil) {
-				// Different holder, lease still valid.
-				status = row
+			case StateRunning:
+				if row.Holder == instanceID {
+					if err := s.updateLease(ctx, tx, key, newLease); err != nil {
+						return err
+					}
+					row.LeaseUntil = newLease
+					status = row
+					return nil
+				}
+				if now.Before(row.LeaseUntil) {
+					// Different holder, lease still valid.
+					status = row
+					return nil
+				}
+				// Lease expired — take over.
+				if err := s.takeOver(ctx, tx, key, instanceID, newLease); err != nil {
+					return err
+				}
+				status = Status{State: StateRunning, Holder: instanceID, LeaseUntil: newLease}
 				return nil
+			default:
+				return fmt.Errorf("acquire: unexpected stored state %q", row.State)
 			}
-			// Lease expired — take over.
-			if err := s.takeOver(ctx, tx, key, instanceID, newLease); err != nil {
-				return err
-			}
-			status = Status{State: StateRunning, Holder: instanceID, LeaseUntil: newLease}
-			return nil
-		default:
-			return fmt.Errorf("acquire: unexpected stored state %q", row.State)
+		})
+		if err != nil {
+			return Status{}, fmt.Errorf("acquire: %w", err)
 		}
-	})
-	if err != nil {
-		return Status{}, fmt.Errorf("acquire: %w", err)
+		if retry && attempt < maxAttempts {
+			continue
+		}
+		return status, nil
 	}
-	return status, nil
 }
 
 // Refresh implements Store.
@@ -325,14 +352,23 @@ func (s *PostgresStore) selectForUpdate(ctx context.Context, tx *sql.Tx, key str
 	return scanStatus(row)
 }
 
-func (s *PostgresStore) insertRunning(ctx context.Context, tx *sql.Tx, key, instanceID string, leaseUntil time.Time) error {
+// insertRunningIfAbsent inserts a fresh running row, doing nothing if another
+// transaction already created the row (ON CONFLICT). It reports whether this
+// call actually inserted (true) or lost the race (false). ON CONFLICT makes the
+// first-insert path race-safe without surfacing a duplicate-key error.
+func (s *PostgresStore) insertRunningIfAbsent(ctx context.Context, tx *sql.Tx, key, instanceID string, leaseUntil time.Time) (bool, error) {
 	// #nosec G201 -- table name is set at construction, not user input
 	q := fmt.Sprintf(`
 		INSERT INTO %s (hook_key, state, holder, lease_until)
 		VALUES ($1, 'running', $2, $3)
+		ON CONFLICT (hook_key) DO NOTHING
 	`, s.table)
-	_, err := tx.ExecContext(ctx, q, key, instanceID, leaseUntil)
-	return err
+	res, err := tx.ExecContext(ctx, q, key, instanceID, leaseUntil)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func (s *PostgresStore) updateLease(ctx context.Context, tx *sql.Tx, key string, leaseUntil time.Time) error {

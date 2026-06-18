@@ -8,6 +8,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Test
@@ -141,3 +145,24 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v3
         with:
           category: "/language:go"
+
+  # Aggregate gate: a single required check that is green only when every core
+  # CI job succeeds. Branch protection requires "CI Gate" so adding/renaming a
+  # job here automatically tightens the gate without editing repo settings.
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [test, integration, lint, codeql]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all core CI jobs passed
+        env:
+          RESULTS: ${{ needs.test.result }} ${{ needs.integration.result }} ${{ needs.lint.result }} ${{ needs.codeql.result }}
+        run: |
+          echo "core job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a required CI job did not succeed ($r)"; exit 1
+            fi
+          done
+          echo "all core CI jobs passed"
