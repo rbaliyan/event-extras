@@ -1,0 +1,78 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly campaign
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - FuzzHookValidateAndKey
+          - FuzzMsToTime
+          - FuzzHashMapToStatus
+          - FuzzParseHashResult
+          - FuzzRedisGetDecode
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      # On pull requests, replay the committed seed corpus quickly; on the
+      # nightly schedule, run a real time-boxed campaign per target.
+      - name: Determine fuzz time
+        id: cfg
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "fuzztime=20s" >> "$GITHUB_OUTPUT"
+          else
+            echo "fuzztime=5m" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fuzz ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+          FUZZTIME: ${{ steps.cfg.outputs.fuzztime }}
+        run: go test -run '^$' -fuzz="^${TARGET}$" -fuzztime="$FUZZTIME" ./lifecycle/
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: lifecycle/testdata/fuzz/
+          if-no-files-found: ignore
+
+  # Aggregate gate so branch protection can require a single "Fuzz Gate" check
+  # covering every matrix target.
+  fuzz-gate:
+    name: Fuzz Gate
+    if: always()
+    needs: [fuzz]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all fuzz targets passed
+        env:
+          RESULT: ${{ needs.fuzz.result }}
+        run: |
+          echo "fuzz matrix result: $RESULT"
+          [ "$RESULT" = "success" ] || { echo "a fuzz target failed"; exit 1; }

@@ -1,0 +1,107 @@
+name: Bench
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # nightly
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bench:
+    name: Benchmark regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      # Deterministic, no external services: only the Memory + miniredis benches
+      # run in the gate (Postgres/Mongo subtests skip without env vars).
+      - name: Benchmark PR head
+        run: go test -run '^$' -bench=. -benchmem -count=6 ./lifecycle/ | tee new.txt
+
+      - name: Benchmark base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --quiet "$BASE_SHA"
+          if [ -f lifecycle/bench_test.go ]; then
+            go test -run '^$' -bench=. -benchmem -count=6 ./lifecycle/ | tee old.txt
+          else
+            echo "base has no benchmarks; skipping regression comparison"
+          fi
+          git checkout --quiet -
+
+      - name: Compare and gate (ns/op + B/op)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ ! -f old.txt ]; then
+            echo "no baseline (base predates benchmarks); informational only"; exit 0
+          fi
+          # Self-contained parser/gate (no external tool to keep CI reproducible):
+          # average the -count=6 samples per benchmark and fail on >15% ns/op or
+          # >20% B/op regression.
+          python3 - <<'PY'
+          import re, sys, statistics
+          def parse(path):
+              ns, bs = {}, {}
+              for line in open(path):
+                  m = re.match(r'(Benchmark\S+)\s+\d+\s+([\d.]+)\s+ns/op(?:\s+([\d.]+)\s+B/op)?', line)
+                  if not m: continue
+                  ns.setdefault(m.group(1), []).append(float(m.group(2)))
+                  if m.group(3) is not None:
+                      bs.setdefault(m.group(1), []).append(float(m.group(3)))
+              return ns, bs
+          old_ns, old_bs = parse('old.txt')
+          new_ns, new_bs = parse('new.txt')
+          def mean(v): return sum(v)/len(v)
+          def cv(v):  return (statistics.pstdev(v)/mean(v)) if len(v) > 1 and mean(v) > 0 else 0.0
+          bad, noisy = [], []
+          def check(old, new, unit, thresh):
+              for k, nv in new.items():
+                  if k not in old or mean(old[k]) <= 0: continue
+                  # Skip (don't gate) statistically noisy samples to avoid
+                  # false failures on shared CI runners; flag them instead.
+                  if cv(nv) > 0.10 or cv(old[k]) > 0.10:
+                      noisy.append(f"{k} [{unit}] (CV {max(cv(nv),cv(old[k]))*100:.0f}%)")
+                      continue
+                  o, n = mean(old[k]), mean(nv)
+                  if n > o*thresh:
+                      bad.append(f"{k}: {o:.0f} -> {n:.0f} {unit} (+{(n/o-1)*100:.1f}%)")
+          check(old_ns, new_ns, "ns/op", 1.15)
+          check(old_bs, new_bs, "B/op", 1.20)
+          if noisy:
+              print("skipped (high variance, not gated):"); print("\n".join(sorted(set(noisy))))
+          if bad:
+              print("benchmark regression(s):"); print("\n".join(bad)); sys.exit(1)
+          print("no significant benchmark regressions (ns/op or B/op)")
+          PY
+
+      - name: Capture profiles on regression
+        if: failure() && github.event_name == 'pull_request'
+        run: |
+          mkdir -p prof
+          go test -run '^$' -bench=BenchmarkMemoryStore_AcquireParallel -benchmem \
+            -cpuprofile=prof/cpu.out -memprofile=prof/mem.out -mutexprofile=prof/mutex.out ./lifecycle/ || true
+
+      - name: Upload profiles
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-profiles
+          path: prof/
+          if-no-files-found: ignore

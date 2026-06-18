@@ -1,5 +1,3 @@
-//go:build integration
-
 package lifecycle
 
 import (
@@ -12,11 +10,15 @@ import (
 	_ "github.com/lib/pq"
 )
 
+// getPostgresDB returns a live *sql.DB, or skips the test when POSTGRES_URI is
+// unset. These tests run in the normal build: with no env they skip instantly
+// (fast default CI job); with POSTGRES_URI set (the integration CI job or a
+// local container) they run and count toward coverage.
 func getPostgresDB(t *testing.T) *sql.DB {
 	t.Helper()
 	uri := os.Getenv("POSTGRES_URI")
 	if uri == "" {
-		uri = "postgres://localhost:5432/test?sslmode=disable"
+		t.Skip("POSTGRES_URI not set; skipping PostgreSQL integration test")
 	}
 	db, err := sql.Open("postgres", uri)
 	if err != nil {
@@ -83,6 +85,36 @@ func TestPostgresStore_Health(t *testing.T) {
 		if _, ok := res.Details[k]; !ok {
 			t.Fatalf("expected detail %q, got %v", k, res.Details)
 		}
+	}
+}
+
+// TestPostgresStore_ErrorsWhenDBClosed injects a backend failure: once the
+// connection pool is closed, operations must surface a wrapped error.
+func TestPostgresStore_ErrorsWhenDBClosed(t *testing.T) {
+	db := getPostgresDB(t)
+	store, err := NewPostgresStore(db, WithPostgresTable("lifecycle_err_test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	ctx := context.Background()
+	if _, err := store.Acquire(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Acquire to error against a closed DB")
+	}
+	if err := store.Reset(ctx, "k"); err == nil {
+		t.Fatal("expected Reset to error against a closed DB")
+	}
+	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Refresh to error against a closed DB")
+	}
+	if err := store.Complete(ctx, "k", "pod-a"); err == nil {
+		t.Fatal("expected Complete to error against a closed DB")
+	}
+	if err := store.Fail(ctx, "k", "pod-a", "x", false); err == nil {
+		t.Fatal("expected Fail to error against a closed DB")
 	}
 }
 

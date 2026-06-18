@@ -122,20 +122,54 @@ func runStoreContractTests(t *testing.T, store Store) {
 		}
 	})
 
-	t.Run("refresh_by_holder_after_own_expiry_fails", func(t *testing.T) {
+	t.Run("expired_lease_rejects_holder_and_allows_takeover", func(t *testing.T) {
 		ctx := context.Background()
 		key := "hook-refresh-expired"
 
-		// Acquire with a very short lease, wait for it to expire, then
-		// the original holder must be told its lease is gone — driver of
-		// the "body may run twice" warning in refreshLoop.
-		if _, err := store.Acquire(ctx, key, "pod-a", 50*time.Millisecond); err != nil {
+		// Acquire a short lease, then poll a competing Acquire until it takes
+		// over (no fixed over-sleep). This pins the data-integrity invariant on
+		// every backend: once a lease lapses, takeover succeeds AND the
+		// displaced holder's Refresh reports ErrLeaseLost — never both holding.
+		if _, err := store.Acquire(ctx, key, "pod-a", 30*time.Millisecond); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(150 * time.Millisecond)
-		err := store.Refresh(ctx, key, "pod-a", time.Minute)
-		if !errors.Is(err, ErrLeaseLost) {
-			t.Fatalf("expected ErrLeaseLost for same holder after own lease expiry, got %v", err)
+		deadline := time.Now().Add(5 * time.Second)
+		var s Status
+		for {
+			var err error
+			if s, err = store.Acquire(ctx, key, "pod-b", time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			if s.Holder == "pod-b" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("pod-b never took over the expired lease, last=%+v", s)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		if err := store.Refresh(ctx, key, "pod-a", time.Minute); !errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("displaced holder Refresh should return ErrLeaseLost, got %v", err)
+		}
+	})
+
+	t.Run("version_bump_is_independently_acquirable", func(t *testing.T) {
+		// The keying contract: completing migrate@v1 must not block migrate@v2.
+		ctx := context.Background()
+		v1 := Hook{Name: "rollover", Version: "v1"}.Key()
+		v2 := Hook{Name: "rollover", Version: "v2"}.Key()
+		if _, err := store.Acquire(ctx, v1, "pod-a", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Complete(ctx, v1, "pod-a"); err != nil {
+			t.Fatal(err)
+		}
+		s, err := store.Acquire(ctx, v2, "pod-a", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.State != StateRunning || s.Holder != "pod-a" {
+			t.Fatalf("v2 should be freshly acquirable after v1 completed, got %+v", s)
 		}
 	})
 
@@ -181,6 +215,88 @@ func runStoreContractTests(t *testing.T, store Store) {
 		}
 		if s.State != StatePending {
 			t.Fatalf("expected StatePending, got %+v", s)
+		}
+	})
+
+	t.Run("concurrent_acquire_single_winner", func(t *testing.T) {
+		// The core guarantee: under genuine contention exactly one caller wins
+		// the claim. Exercises each backend's atomicity primitive directly —
+		// Postgres SELECT ... FOR UPDATE, Mongo findOneAndUpdate+upsert
+		// collision, Redis Lua, Memory mutex.
+		ctx := context.Background()
+		key := "hook-concurrent"
+		const racers = 16
+		var winners, observers int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := range racers {
+			wg.Add(1)
+			id := fmt.Sprintf("pod-%d", i)
+			go func() {
+				defer wg.Done()
+				<-start
+				s, err := store.Acquire(ctx, key, id, time.Minute)
+				if err != nil {
+					t.Errorf("acquire %s: %v", id, err)
+					return
+				}
+				switch {
+				case s.State == StateRunning && s.Holder == id:
+					atomic.AddInt32(&winners, 1)
+				case s.State == StateRunning:
+					atomic.AddInt32(&observers, 1)
+				default:
+					t.Errorf("pod %s saw unexpected state %+v", id, s)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if winners != 1 {
+			t.Fatalf("expected exactly one winner, got %d (observers=%d)", winners, observers)
+		}
+		if observers != racers-1 {
+			t.Fatalf("expected %d observers, got %d", racers-1, observers)
+		}
+	})
+
+	t.Run("concurrent_expired_takeover_single_winner", func(t *testing.T) {
+		// The harder real-world race: a lease lapses and N pods simultaneously
+		// try to take it over. Exactly one must win the new claim. Exercises
+		// the take-over branch of each backend's atomicity primitive under
+		// genuine contention, not just the fresh-insert branch.
+		ctx := context.Background()
+		key := "hook-concurrent-takeover"
+		if _, err := store.Acquire(ctx, key, "holder-0", 30*time.Millisecond); err != nil {
+			t.Fatal(err)
+		}
+		// Let the lease lapse (short, fixed: 30ms lease, wait ~5x).
+		time.Sleep(150 * time.Millisecond)
+
+		const racers = 16
+		var winners int32
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := range racers {
+			wg.Add(1)
+			id := fmt.Sprintf("taker-%d", i)
+			go func() {
+				defer wg.Done()
+				<-start
+				s, err := store.Acquire(ctx, key, id, time.Minute)
+				if err != nil {
+					t.Errorf("acquire %s: %v", id, err)
+					return
+				}
+				if s.State == StateRunning && s.Holder == id {
+					atomic.AddInt32(&winners, 1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if winners != 1 {
+			t.Fatalf("expected exactly one takeover winner, got %d", winners)
 		}
 	})
 }
@@ -295,6 +411,52 @@ func TestOnce_LeaseLostDuringExecution_Takeover(t *testing.T) {
 	}
 }
 
+func TestOnce_ArgumentValidation(t *testing.T) {
+	ctx := context.Background()
+	noop := func(context.Context) error { return nil }
+
+	if _, err := Once(ctx, nil, Hook{Name: "m"}, noop); err == nil {
+		t.Fatal("expected error for nil store")
+	}
+	if _, err := Once(ctx, NewMemoryStore(), Hook{Name: "m"}, nil); err == nil {
+		t.Fatal("expected error for nil fn")
+	}
+	if _, err := Once(ctx, NewMemoryStore(), Hook{Name: ""}, noop); err == nil {
+		t.Fatal("expected error for empty hook name")
+	}
+}
+
+func TestOnce_WithLoggerApplied(t *testing.T) {
+	// A nil logger must be ignored (default retained); a real logger accepted.
+	store := NewMemoryStore()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	out, err := Once(context.Background(), store, Hook{Name: "m", Version: "v1"},
+		func(context.Context) error { return nil },
+		WithLogger(log), WithLogger(nil), WithInstanceID(""), WithLease(0), WithRefreshInterval(-1))
+	if err != nil || out != OutcomeRan {
+		t.Fatalf("expected OutcomeRan, got %v err=%v", out, err)
+	}
+}
+
+// stateInjectingStore returns a bogus post-Acquire state to drive the
+// "unexpected post-acquire state" guard in Once.
+type stateInjectingStore struct {
+	Store
+	state State
+}
+
+func (s *stateInjectingStore) Acquire(context.Context, string, string, time.Duration) (Status, error) {
+	return Status{State: s.state}, nil
+}
+
+func TestOnce_UnexpectedPostAcquireState(t *testing.T) {
+	store := &stateInjectingStore{Store: NewMemoryStore(), state: State("bogus")}
+	_, err := Once(context.Background(), store, Hook{Name: "m"}, func(context.Context) error { return nil })
+	if err == nil {
+		t.Fatal("expected error for unexpected post-acquire state")
+	}
+}
+
 // TestRefreshLoop_GivesUpAfterLeaseWindowOnTransientErrors covers the
 // escalation branch: when Refresh keeps returning a non-sentinel (transient)
 // error past a full lease window, the loop presumes the lease lost and exits
@@ -304,14 +466,21 @@ func TestRefreshLoop_GivesUpAfterLeaseWindowOnTransientErrors(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	done := make(chan struct{})
 
+	const lease = 60 * time.Millisecond
 	// Short lease so the deadline lapses quickly; shorter interval so ticks
-	// fire several times within the window. Parent context is never cancelled.
+	// fire several times within the window. Parent context is never cancelled,
+	// so the only way the loop can exit is the transient give-up branch.
+	start := time.Now()
 	go refreshLoop(context.Background(), store, "k", "pod-a",
-		40*time.Millisecond, 10*time.Millisecond, log, done)
+		lease, 10*time.Millisecond, log, done)
 
 	select {
 	case <-done:
-		// Loop gave up by itself — escalation branch exercised.
+		// Must give up only AFTER a full lease window — not on the first error.
+		// This distinguishes the escalation contract from an immediate bail-out.
+		if elapsed := time.Since(start); elapsed < lease {
+			t.Fatalf("gave up after %v, before the lease window (%v) elapsed", elapsed, lease)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("refreshLoop did not give up after the lease window elapsed under persistent transient errors")
 	}
@@ -533,6 +702,7 @@ func (c *completeFailingStore) Complete(context.Context, string, string) error {
 }
 
 func TestHook_Validate(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		hook    Hook
@@ -566,6 +736,7 @@ func TestHook_Validate(t *testing.T) {
 }
 
 func TestHook_Key(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		hook Hook

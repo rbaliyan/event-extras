@@ -1,5 +1,3 @@
-//go:build integration
-
 package lifecycle
 
 import (
@@ -13,15 +11,20 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// getMongoClient returns a live client, or skips the test when MONGO_URI is
+// unset. Runs in the normal build: skips instantly with no env (fast default
+// CI job), runs against a container when MONGO_URI is set and counts toward
+// coverage. A short server-selection timeout keeps the skip fast if the URI
+// points at an unreachable server.
 func getMongoClient(t *testing.T) *mongo.Client {
 	t.Helper()
 	uri := os.Getenv("MONGO_URI")
 	if uri == "" {
-		uri = "mongodb://localhost:27017"
+		t.Skip("MONGO_URI not set; skipping MongoDB integration test")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	client, err := mongo.Connect(options.Client().ApplyURI(uri).SetServerSelectionTimeout(2 * time.Second))
 	if err != nil {
 		t.Skipf("MongoDB not available: %v", err)
 	}
@@ -73,6 +76,34 @@ func TestMongoStore_Health(t *testing.T) {
 		if _, ok := res.Details[k]; !ok {
 			t.Fatalf("expected detail %q, got %v", k, res.Details)
 		}
+	}
+}
+
+// TestMongoStore_ErrorsWhenDisconnected injects a backend failure: after the
+// client disconnects, operations must surface a wrapped error.
+func TestMongoStore_ErrorsWhenDisconnected(t *testing.T) {
+	client := getMongoClient(t)
+	db := client.Database(fmt.Sprintf("lifecycle_err_%d", time.Now().UnixNano()))
+	store, err := NewMongoStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Disconnect(context.Background())
+	ctx := context.Background()
+	if _, err := store.Acquire(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Acquire to error after disconnect")
+	}
+	if err := store.Reset(ctx, "k"); err == nil {
+		t.Fatal("expected Reset to error after disconnect")
+	}
+	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Refresh to error after disconnect")
+	}
+	if err := store.Complete(ctx, "k", "pod-a"); err == nil {
+		t.Fatal("expected Complete to error after disconnect")
+	}
+	if err := store.Fail(ctx, "k", "pod-a", "x", false); err == nil {
+		t.Fatal("expected Fail to error after disconnect")
 	}
 }
 

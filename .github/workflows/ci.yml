@@ -8,6 +8,10 @@ on:
 
 permissions: read-all
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Test
@@ -26,6 +30,81 @@ jobs:
 
       - name: Test
         run: go test -v -race ./...
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: lifecycle_test
+        ports:
+          - 5440:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      mongo:
+        image: mongo:7
+        ports:
+          - 27027:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    env:
+      REDIS_ADDR: localhost:6390
+      POSTGRES_URI: postgres://test:test@localhost:5440/lifecycle_test?sslmode=disable
+      MONGO_URI: mongodb://localhost:27027
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify all backends are reachable
+        run: |
+          for hp in "$REDIS_ADDR" "localhost:5440" "localhost:27027"; do
+            host="${hp%%:*}"; port="${hp##*:}"
+            timeout 60 bash -c "until echo > /dev/tcp/${host}/${port}; do sleep 1; done" \
+              || { echo "backend ${hp} not reachable; failing rather than silently skipping"; exit 1; }
+            echo "backend ${hp} reachable"
+          done
+
+      - name: Run tests against live backends
+        run: go test -race -v ./...
+
+      - name: Assert backend integration tests actually ran (not skipped)
+        run: |
+          go test -v -run 'TestPostgresStore_Contract|TestMongoStore_Contract|TestRedisStore_ContractIntegration' ./lifecycle/ 2>&1 | tee int.log
+          if grep -q -- '--- SKIP' int.log; then
+            echo "a backend integration test was SKIPPED — backend env/connectivity is broken"; exit 1
+          fi
+
+      - name: Enforce lifecycle coverage threshold
+        run: |
+          go test -coverprofile=coverage.out ./lifecycle/... >/dev/null
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%","",$NF); print $NF}')
+          echo "lifecycle coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit !(t+0 >= 85.0) }' \
+            || { echo "lifecycle coverage ${total}% below threshold 85%"; exit 1; }
 
   lint:
     name: Lint
@@ -66,3 +145,24 @@ jobs:
         uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v3
         with:
           category: "/language:go"
+
+  # Aggregate gate: a single required check that is green only when every core
+  # CI job succeeds. Branch protection requires "CI Gate" so adding/renaming a
+  # job here automatically tightens the gate without editing repo settings.
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [test, integration, lint, codeql]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all core CI jobs passed
+        env:
+          RESULTS: ${{ needs.test.result }} ${{ needs.integration.result }} ${{ needs.lint.result }} ${{ needs.codeql.result }}
+        run: |
+          echo "core job results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a required CI job did not succeed ($r)"; exit 1
+            fi
+          done
+          echo "all core CI jobs passed"

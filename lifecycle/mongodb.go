@@ -30,6 +30,10 @@ import (
 //	}
 type MongoStore struct {
 	collection *mongo.Collection
+	// countByState counts documents in the given state. It defaults to a
+	// CountDocuments call and is only overridden in tests to exercise the
+	// Health degraded branch (mirrors MemoryStore's injectable clock).
+	countByState func(ctx context.Context, state State) (int64, error)
 }
 
 // MongoOption configures a MongoStore.
@@ -58,7 +62,11 @@ func NewMongoStore(db *mongo.Database, opts ...MongoOption) (*MongoStore, error)
 	for _, opt := range opts {
 		opt(o)
 	}
-	return &MongoStore{collection: db.Collection(o.collection)}, nil
+	s := &MongoStore{collection: db.Collection(o.collection)}
+	s.countByState = func(ctx context.Context, state State) (int64, error) {
+		return s.collection.CountDocuments(ctx, bson.M{"state": state})
+	}
+	return s, nil
 }
 
 // Collection returns the underlying MongoDB collection. Exposed so that
@@ -263,7 +271,7 @@ func (s *MongoStore) Health(ctx context.Context) *health.Result {
 		"completed": StateCompleted,
 		"failed":    StateFailed,
 	} {
-		n, err := s.collection.CountDocuments(ctx, bson.M{"state": state})
+		n, err := s.countByState(ctx, state)
 		if err != nil {
 			return &health.Result{
 				Status:    health.StatusDegraded,

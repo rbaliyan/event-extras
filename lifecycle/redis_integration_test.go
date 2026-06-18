@@ -1,5 +1,3 @@
-//go:build integration
-
 package lifecycle
 
 import (
@@ -12,11 +10,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// getRedisClient returns a live client, or skips the test when REDIS_ADDR is
+// unset. Runs in the normal build: skips instantly with no env, runs against a
+// container when REDIS_ADDR is set. (The miniredis-backed tests already cover
+// the Redis store in the default build; these exercise a real server.)
 func getRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
 	addr := os.Getenv("REDIS_ADDR")
 	if addr == "" {
-		addr = "localhost:6379"
+		t.Skip("REDIS_ADDR not set; skipping Redis integration test")
 	}
 	client := redis.NewClient(&redis.Options{Addr: addr})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -68,10 +70,14 @@ func TestRedisStore_LeaseExpiry(t *testing.T) {
 	ctx := context.Background()
 	key := "lease-expiry"
 
+	// Drive expiry deterministically through the injectable clock (the Lua
+	// scripts compare against the now_ms we pass) instead of a wall-clock sleep.
+	base := time.Now()
+	store.now = func() time.Time { return base }
 	if _, err := store.Acquire(ctx, key, "pod-a", 100*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
+	store.now = func() time.Time { return base.Add(time.Second) } // past the lease
 
 	s, err := store.Acquire(ctx, key, "pod-b", time.Minute)
 	if err != nil {
@@ -79,5 +85,36 @@ func TestRedisStore_LeaseExpiry(t *testing.T) {
 	}
 	if s.Holder != "pod-b" {
 		t.Fatalf("expected pod-b to take over expired lease, got %+v", s)
+	}
+}
+
+// TestRedisStore_ErrorsWhenServerDown injects a backend failure: after the
+// client is closed, store operations must surface a wrapped error rather than
+// silently succeeding.
+func TestRedisStore_ErrorsWhenServerDown(t *testing.T) {
+	client := getRedisClient(t)
+	store, err := NewRedisStore(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	ctx := context.Background()
+	if _, err := store.Acquire(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Acquire to error against a closed client")
+	}
+	if err := store.Reset(ctx, "k"); err == nil {
+		t.Fatal("expected Reset to error against a closed client")
+	}
+	if _, err := store.Get(ctx, "k"); err == nil {
+		t.Fatal("expected Get to error against a closed client")
+	}
+	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Refresh to error against a closed client")
+	}
+	if err := store.Complete(ctx, "k", "pod-a"); err == nil {
+		t.Fatal("expected Complete to error against a closed client")
+	}
+	if err := store.Fail(ctx, "k", "pod-a", "x", false); err == nil {
+		t.Fatal("expected Fail to error against a closed client")
 	}
 }
