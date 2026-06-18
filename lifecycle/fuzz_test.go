@@ -130,16 +130,26 @@ func FuzzParseHashResult(f *testing.F) {
 			return
 		}
 		// Build an alternating array of mixed string / non-string elements.
+		// Occasionally inject the real field names and valid state literals so
+		// the populated decode path (not just the pending default) is driven.
+		states := []string{"running", "completed", "failed"}
 		res := make([]any, len(data))
 		for i, b := range data {
-			if b%3 == 0 {
+			switch {
+			case b%7 == 0 && i+1 < len(data):
+				res[i] = "state"
+			case b%7 == 1:
+				res[i] = states[int(b)%len(states)]
+			case b%3 == 0:
 				res[i] = int(b) // non-string exercises the comma-ok asserts
-			} else {
+			default:
 				res[i] = string([]byte{b})
 			}
 		}
 		s, err := parseHashResult(res)
 		if err != nil {
+			// A []any can never error by construction (parseHashResult only
+			// errors on a non-slice); guard so a future change fails loudly.
 			t.Fatalf("[]any input must not error, got %v", err)
 		}
 		switch s.State {

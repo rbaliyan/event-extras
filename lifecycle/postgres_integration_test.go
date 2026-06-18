@@ -110,6 +110,12 @@ func TestPostgresStore_ErrorsWhenDBClosed(t *testing.T) {
 	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); err == nil {
 		t.Fatal("expected Refresh to error against a closed DB")
 	}
+	if err := store.Complete(ctx, "k", "pod-a"); err == nil {
+		t.Fatal("expected Complete to error against a closed DB")
+	}
+	if err := store.Fail(ctx, "k", "pod-a", "x", false); err == nil {
+		t.Fatal("expected Fail to error against a closed DB")
+	}
 }
 
 func TestPostgresStore_LeaseExpiry(t *testing.T) {

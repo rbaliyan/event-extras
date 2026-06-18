@@ -42,28 +42,37 @@ jobs:
           fi
           git checkout --quiet -
 
-      - name: Compare with benchstat
+      - name: Compare and gate (ns/op + B/op)
         if: github.event_name == 'pull_request'
         run: |
           if [ ! -f old.txt ]; then
-            echo "no baseline; informational only"; exit 0
+            echo "no baseline (base predates benchmarks); informational only"; exit 0
           fi
-          go run golang.org/x/perf/cmd/benchstat@latest old.txt new.txt | tee bench.txt
-          # Gate: fail if any benchmark's ns/op regressed by more than 15%.
+          # Self-contained parser/gate (no external tool to keep CI reproducible):
+          # average the -count=6 samples per benchmark and fail on >15% ns/op or
+          # >20% B/op regression.
           python3 - <<'PY'
           import re, sys
           def parse(path):
-              vals={}
+              ns, bs = {}, {}
               for line in open(path):
-                  m=re.match(r'(Benchmark\S+)\s+\d+\s+([\d.]+)\s+ns/op', line)
-                  if m: vals.setdefault(m.group(1),[]).append(float(m.group(2)))
-              return {k:sum(v)/len(v) for k,v in vals.items()}
-          old,new=parse('old.txt'),parse('new.txt')
-          bad=[]
-          for k,nv in new.items():
-              if k in old and old[k]>0 and nv > old[k]*1.15:
-                  bad.append(f"{k}: {old[k]:.0f} -> {nv:.0f} ns/op (+{(nv/old[k]-1)*100:.1f}%)")
+                  m = re.match(r'(Benchmark\S+)\s+\d+\s+([\d.]+)\s+ns/op(?:\s+([\d.]+)\s+B/op)?', line)
+                  if not m: continue
+                  ns.setdefault(m.group(1), []).append(float(m.group(2)))
+                  if m.group(3) is not None:
+                      bs.setdefault(m.group(1), []).append(float(m.group(3)))
+              avg = lambda d: {k: sum(v)/len(v) for k, v in d.items()}
+              return avg(ns), avg(bs)
+          old_ns, old_bs = parse('old.txt')
+          new_ns, new_bs = parse('new.txt')
+          bad = []
+          for k, nv in new_ns.items():
+              if k in old_ns and old_ns[k] > 0 and nv > old_ns[k]*1.15:
+                  bad.append(f"{k}: {old_ns[k]:.0f} -> {nv:.0f} ns/op (+{(nv/old_ns[k]-1)*100:.1f}%)")
+          for k, nv in new_bs.items():
+              if k in old_bs and old_bs[k] > 0 and nv > old_bs[k]*1.20:
+                  bad.append(f"{k}: {old_bs[k]:.0f} -> {nv:.0f} B/op (+{(nv/old_bs[k]-1)*100:.1f}%)")
           if bad:
-              print("benchmark regression(s) beyond 15%:"); print("\n".join(bad)); sys.exit(1)
-          print("no significant benchmark regressions")
+              print("benchmark regression(s):"); print("\n".join(bad)); sys.exit(1)
+          print("no significant benchmark regressions (ns/op or B/op)")
           PY

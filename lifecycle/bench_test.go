@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -191,10 +192,39 @@ func BenchmarkStore_Acquire(b *testing.B) {
 		}
 	}
 
+	// For an apples-to-apples networked comparison, the redis row uses a LIVE
+	// server (REDIS_ADDR) like the postgres/mongo rows; the in-process miniredis
+	// number lives in BenchmarkRedisStore_Acquire.
 	b.Run("memory", func(b *testing.B) { run(b, NewMemoryStore()) })
-	b.Run("redis", func(b *testing.B) { run(b, newRedisBenchStore(b)) })
+	b.Run("redis", func(b *testing.B) { run(b, newLiveRedisBenchStore(b)) })
 	b.Run("postgres", func(b *testing.B) { run(b, newPostgresBenchStore(b)) })
 	b.Run("mongo", func(b *testing.B) { run(b, newMongoBenchStore(b)) })
+}
+
+func newLiveRedisBenchStore(b *testing.B) *RedisStore {
+	b.Helper()
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		b.Skip("REDIS_ADDR not set; skipping live Redis benchmark")
+	}
+	client := redis.NewClient(&redis.Options{Addr: addr})
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		b.Skipf("redis not reachable: %v", err)
+	}
+	prefix := fmt.Sprintf("lifecycle:bench:%d:", b.N)
+	b.Cleanup(func() {
+		ctx := context.Background()
+		iter := client.Scan(ctx, 0, prefix+"*", 0).Iterator()
+		for iter.Next(ctx) {
+			client.Del(ctx, iter.Val())
+		}
+		_ = client.Close()
+	})
+	store, err := NewRedisStore(client, WithRedisPrefix(prefix))
+	if err != nil {
+		b.Fatal(err)
+	}
+	return store
 }
 
 func newPostgresBenchStore(b *testing.B) *PostgresStore {

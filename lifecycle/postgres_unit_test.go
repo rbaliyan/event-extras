@@ -217,12 +217,23 @@ func TestPostgresStore_Refresh(t *testing.T) {
 
 func TestPostgresStore_Complete(t *testing.T) {
 	t.Parallel()
-	store, mock := newPGMock(t)
-	mock.ExpectExec("SET state = 'completed'").WillReturnResult(sqlmock.NewResult(0, 0))
-	if err := store.Complete(context.Background(), "k", "pod-a"); !errors.Is(err, ErrLeaseLost) {
-		t.Fatalf("expected ErrLeaseLost when no row updated, got %v", err)
-	}
-	assertExpectationsMet(t, mock)
+	t.Run("lease_lost", func(t *testing.T) {
+		store, mock := newPGMock(t)
+		mock.ExpectExec("SET state = 'completed'").WillReturnResult(sqlmock.NewResult(0, 0))
+		if err := store.Complete(context.Background(), "k", "pod-a"); !errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("expected ErrLeaseLost when no row updated, got %v", err)
+		}
+		assertExpectationsMet(t, mock)
+	})
+	t.Run("db_error_wrapped", func(t *testing.T) {
+		store, mock := newPGMock(t)
+		mock.ExpectExec("SET state = 'completed'").WillReturnError(errors.New("conn reset"))
+		err := store.Complete(context.Background(), "k", "pod-a")
+		if err == nil || errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("expected a wrapped DB error, got %v", err)
+		}
+		assertExpectationsMet(t, mock)
+	})
 }
 
 func TestPostgresStore_Fail(t *testing.T) {
@@ -248,6 +259,15 @@ func TestPostgresStore_Fail(t *testing.T) {
 		mock.ExpectExec("DELETE FROM lifecycle_hooks").WillReturnResult(sqlmock.NewResult(0, 0))
 		if err := store.Fail(context.Background(), "k", "pod-a", "transient", true); !errors.Is(err, ErrLeaseLost) {
 			t.Fatalf("expected ErrLeaseLost, got %v", err)
+		}
+		assertExpectationsMet(t, mock)
+	})
+	t.Run("db_error_wrapped", func(t *testing.T) {
+		store, mock := newPGMock(t)
+		mock.ExpectExec("SET state = 'failed'").WillReturnError(errors.New("conn reset"))
+		err := store.Fail(context.Background(), "k", "pod-a", "boom", false)
+		if err == nil || errors.Is(err, ErrLeaseLost) {
+			t.Fatalf("expected a wrapped DB error, got %v", err)
 		}
 		assertExpectationsMet(t, mock)
 	})

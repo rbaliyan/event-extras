@@ -96,6 +96,15 @@ func TestMongoStore_ErrorsWhenDisconnected(t *testing.T) {
 	if err := store.Reset(ctx, "k"); err == nil {
 		t.Fatal("expected Reset to error after disconnect")
 	}
+	if err := store.Refresh(ctx, "k", "pod-a", time.Minute); err == nil {
+		t.Fatal("expected Refresh to error after disconnect")
+	}
+	if err := store.Complete(ctx, "k", "pod-a"); err == nil {
+		t.Fatal("expected Complete to error after disconnect")
+	}
+	if err := store.Fail(ctx, "k", "pod-a", "x", false); err == nil {
+		t.Fatal("expected Fail to error after disconnect")
+	}
 }
 
 func TestMongoStore_LeaseExpiry(t *testing.T) {
