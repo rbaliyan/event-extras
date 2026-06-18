@@ -52,7 +52,7 @@ jobs:
           # average the -count=6 samples per benchmark and fail on >15% ns/op or
           # >20% B/op regression.
           python3 - <<'PY'
-          import re, sys
+          import re, sys, statistics
           def parse(path):
               ns, bs = {}, {}
               for line in open(path):
@@ -61,18 +61,43 @@ jobs:
                   ns.setdefault(m.group(1), []).append(float(m.group(2)))
                   if m.group(3) is not None:
                       bs.setdefault(m.group(1), []).append(float(m.group(3)))
-              avg = lambda d: {k: sum(v)/len(v) for k, v in d.items()}
-              return avg(ns), avg(bs)
+              return ns, bs
           old_ns, old_bs = parse('old.txt')
           new_ns, new_bs = parse('new.txt')
-          bad = []
-          for k, nv in new_ns.items():
-              if k in old_ns and old_ns[k] > 0 and nv > old_ns[k]*1.15:
-                  bad.append(f"{k}: {old_ns[k]:.0f} -> {nv:.0f} ns/op (+{(nv/old_ns[k]-1)*100:.1f}%)")
-          for k, nv in new_bs.items():
-              if k in old_bs and old_bs[k] > 0 and nv > old_bs[k]*1.20:
-                  bad.append(f"{k}: {old_bs[k]:.0f} -> {nv:.0f} B/op (+{(nv/old_bs[k]-1)*100:.1f}%)")
+          def mean(v): return sum(v)/len(v)
+          def cv(v):  return (statistics.pstdev(v)/mean(v)) if len(v) > 1 and mean(v) > 0 else 0.0
+          bad, noisy = [], []
+          def check(old, new, unit, thresh):
+              for k, nv in new.items():
+                  if k not in old or mean(old[k]) <= 0: continue
+                  # Skip (don't gate) statistically noisy samples to avoid
+                  # false failures on shared CI runners; flag them instead.
+                  if cv(nv) > 0.10 or cv(old[k]) > 0.10:
+                      noisy.append(f"{k} [{unit}] (CV {max(cv(nv),cv(old[k]))*100:.0f}%)")
+                      continue
+                  o, n = mean(old[k]), mean(nv)
+                  if n > o*thresh:
+                      bad.append(f"{k}: {o:.0f} -> {n:.0f} {unit} (+{(n/o-1)*100:.1f}%)")
+          check(old_ns, new_ns, "ns/op", 1.15)
+          check(old_bs, new_bs, "B/op", 1.20)
+          if noisy:
+              print("skipped (high variance, not gated):"); print("\n".join(sorted(set(noisy))))
           if bad:
               print("benchmark regression(s):"); print("\n".join(bad)); sys.exit(1)
           print("no significant benchmark regressions (ns/op or B/op)")
           PY
+
+      - name: Capture profiles on regression
+        if: failure() && github.event_name == 'pull_request'
+        run: |
+          mkdir -p prof
+          go test -run '^$' -bench=BenchmarkMemoryStore_AcquireParallel -benchmem \
+            -cpuprofile=prof/cpu.out -memprofile=prof/mem.out -mutexprofile=prof/mutex.out ./lifecycle/ || true
+
+      - name: Upload profiles
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: bench-profiles
+          path: prof/
+          if-no-files-found: ignore

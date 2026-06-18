@@ -1,9 +1,13 @@
 package lifecycle
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 // FuzzHookValidateAndKey asserts the two pure Hook methods never panic on
@@ -102,7 +106,57 @@ func FuzzHashMapToStatus(f *testing.F) {
 				t.Fatalf("pending status must be fully zero-valued, got %+v", s)
 			}
 		case StateRunning, StateCompleted, StateFailed:
-			// valid running/terminal states
+			// Value-equivalence oracle: on a recognized state, a parseable
+			// lease must round-trip exactly through to LeaseUntil.
+			if n, err := strconv.ParseInt(lease, 10, 64); err == nil && n != 0 {
+				if s.LeaseUntil.UnixMilli() != n {
+					t.Fatalf("lease_until_ms %q did not round-trip: got %d, want %d",
+						lease, s.LeaseUntil.UnixMilli(), n)
+				}
+			}
+		default:
+			t.Fatalf("decoded an undefined State %q", s.State)
+		}
+	})
+}
+
+// FuzzRedisGetDecode is a differential/integration fuzz target: it writes
+// arbitrary hash fields into a real (in-process miniredis) server, then decodes
+// them through the full RedisStore.Get -> HGETALL -> hashMapToStatus path.
+// This exercises a Store method surface (not just the pure helpers) and asserts
+// the decoder never panics and always yields a defined State. Go runs each
+// fuzz worker as its own process, so the shared miniredis here is used
+// sequentially within a process — no concurrency hazard.
+func FuzzRedisGetDecode(f *testing.F) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		f.Fatalf("miniredis.Run: %v", err)
+	}
+	f.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	f.Cleanup(func() { _ = client.Close() })
+	store, err := NewRedisStore(client)
+	if err != nil {
+		f.Fatalf("NewRedisStore: %v", err)
+	}
+	ctx := context.Background()
+
+	f.Add("running", "pod-a", "1700000000000")
+	f.Add("completed", "", "0")
+	f.Add("garbage", "x", "not-a-number")
+	f.Add("", "", "")
+
+	f.Fuzz(func(t *testing.T, state, holder, lease string) {
+		key := store.key("k")
+		mr.HSet(key, "state", state, "holder", holder, "lease_until_ms", lease)
+		defer mr.Del(key)
+
+		s, err := store.Get(ctx, "k")
+		if err != nil {
+			t.Fatalf("Get must not error on a present key: %v", err)
+		}
+		switch s.State {
+		case StatePending, StateRunning, StateCompleted, StateFailed:
 		default:
 			t.Fatalf("decoded an undefined State %q", s.State)
 		}
@@ -133,13 +187,16 @@ func FuzzParseHashResult(f *testing.F) {
 		// Occasionally inject the real field names and valid state literals so
 		// the populated decode path (not just the pending default) is driven.
 		states := []string{"running", "completed", "failed"}
+		fields := []string{"state", "holder", "lease_until_ms", "completed_at_ms", "failed_at_ms", "error"}
 		res := make([]any, len(data))
 		for i, b := range data {
 			switch {
 			case b%7 == 0 && i+1 < len(data):
-				res[i] = "state"
+				res[i] = fields[int(b)%len(fields)] // real field-name vocabulary
 			case b%7 == 1:
 				res[i] = states[int(b)%len(states)]
+			case b%7 == 2:
+				res[i] = "1700000000000" // a valid timestamp value
 			case b%3 == 0:
 				res[i] = int(b) // non-string exercises the comma-ok asserts
 			default:

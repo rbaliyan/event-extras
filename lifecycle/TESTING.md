@@ -30,14 +30,16 @@ they skip instantly when unset and run (counting toward coverage) when set.
 
 ## Fuzzing
 
-Four targets in `fuzz_test.go`, all pure/deterministic:
+Five targets in `fuzz_test.go`. Each row lists the surface and the invariant it
+guards (so a change that breaks the property fails self-documentingly):
 
-| Target | Surface |
-|--------|---------|
-| `FuzzHookValidateAndKey` | `Hook.Validate` + `Hook.Key` name@version round-trip |
-| `FuzzMsToTime` | Redis millisecond decoder (exact strconv inverse) |
-| `FuzzHashMapToStatus` | HGETALL → `Status` decode (State domain + pending zero-value) |
-| `FuzzParseHashResult` | Lua-result parser (all four branches) |
+| Target | Surface | Invariant guarded |
+|--------|---------|-------------------|
+| `FuzzHookValidateAndKey` | `Hook.Validate` + `Hook.Key` | valid hook ⇒ `name@version` round-trips via first `@` |
+| `FuzzMsToTime` | Redis millisecond decoder | exact `strconv`+`UnixMilli` inverse |
+| `FuzzHashMapToStatus` | HGETALL → `Status` | State ∈ domain; pending ⇒ zero-valued; lease value round-trips |
+| `FuzzParseHashResult` | Lua-result parser | never panics; State ∈ domain (all four branches) |
+| `FuzzRedisGetDecode` | `RedisStore.Get` → decode (miniredis) | never panics; State ∈ domain through the real client path |
 
 ```bash
 just fuzz FuzzParseHashResult 1m   # local campaign
