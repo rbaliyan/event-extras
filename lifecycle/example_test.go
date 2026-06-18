@@ -25,10 +25,6 @@ func Example_onDeploymentStart() {
 		// runMigration(ctx, db)
 		return nil
 	})
-	if err != nil {
-		fmt.Println("migration error:", err)
-		return
-	}
 
 	switch outcome {
 	case lifecycle.OutcomeRan:
@@ -39,6 +35,18 @@ func Example_onDeploymentStart() {
 		fmt.Println("another pod is running the migration, skipping")
 	case lifecycle.OutcomeSkippedFailed:
 		fmt.Println("migration is in failed state, manual intervention needed")
+	case lifecycle.OutcomeFailed:
+		// This pod ran the migration but it errored (or panicked). With the
+		// default WithRetryable(false) the hook is now in terminal failed
+		// state and needs a Reset (or version bump) before it runs again.
+		fmt.Println("this pod ran the migration and it failed:", err)
+	case lifecycle.OutcomeCompleteFailed:
+		// The migration succeeded but the bookkeeping write did not; the work
+		// happened, only the completion record is wedged until lease expiry.
+		fmt.Println("migration ran but completion was not recorded:", err)
+	default:
+		// Argument-validation failures return an empty outcome and an error.
+		fmt.Println("migration could not start:", err)
 	}
 	// Output: this pod ran the migration
 }

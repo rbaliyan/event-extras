@@ -242,6 +242,11 @@ func (s *MongoStore) Reset(ctx context.Context, key string) error {
 }
 
 // Health implements health.Checker.
+//
+// A failed ping reports StatusUnhealthy. If the ping succeeds but the
+// per-state document counts cannot be read, it reports StatusDegraded (the
+// backend is reachable but the state breakdown is unavailable). Otherwise it
+// reports StatusHealthy with running/completed/failed counts in Details.
 func (s *MongoStore) Health(ctx context.Context) *health.Result {
 	start := time.Now()
 	if err := s.collection.Database().Client().Ping(ctx, nil); err != nil {
@@ -252,19 +257,28 @@ func (s *MongoStore) Health(ctx context.Context) *health.Result {
 			CheckedAt: start,
 		}
 	}
-	running, _ := s.collection.CountDocuments(ctx, bson.M{"state": StateRunning})
-	completed, _ := s.collection.CountDocuments(ctx, bson.M{"state": StateCompleted})
-	failed, _ := s.collection.CountDocuments(ctx, bson.M{"state": StateFailed})
+	counts := map[string]any{"collection": s.collection.Name()}
+	for field, state := range map[string]State{
+		"running":   StateRunning,
+		"completed": StateCompleted,
+		"failed":    StateFailed,
+	} {
+		n, err := s.collection.CountDocuments(ctx, bson.M{"state": state})
+		if err != nil {
+			return &health.Result{
+				Status:    health.StatusDegraded,
+				Message:   fmt.Sprintf("count by state failed: %v", err),
+				Latency:   time.Since(start),
+				CheckedAt: start,
+			}
+		}
+		counts[field] = n
+	}
 	return &health.Result{
 		Status:    health.StatusHealthy,
 		Latency:   time.Since(start),
 		CheckedAt: start,
-		Details: map[string]any{
-			"running":    running,
-			"completed":  completed,
-			"failed":     failed,
-			"collection": s.collection.Name(),
-		},
+		Details:   counts,
 	}
 }
 
