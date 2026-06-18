@@ -1,0 +1,69 @@
+name: Bench
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # nightly
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+permissions: read-all
+
+jobs:
+  bench:
+    name: Benchmark regression gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      # Deterministic, no external services: only the Memory + miniredis benches
+      # run in the gate (Postgres/Mongo subtests skip without env vars).
+      - name: Benchmark PR head
+        run: go test -run '^$' -bench=. -benchmem -count=6 ./lifecycle/ | tee new.txt
+
+      - name: Benchmark base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --quiet "$BASE_SHA"
+          if [ -f lifecycle/bench_test.go ]; then
+            go test -run '^$' -bench=. -benchmem -count=6 ./lifecycle/ | tee old.txt
+          else
+            echo "base has no benchmarks; skipping regression comparison"
+          fi
+          git checkout --quiet -
+
+      - name: Compare with benchstat
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ ! -f old.txt ]; then
+            echo "no baseline; informational only"; exit 0
+          fi
+          go run golang.org/x/perf/cmd/benchstat@latest old.txt new.txt | tee bench.txt
+          # Gate: fail if any benchmark's ns/op regressed by more than 15%.
+          python3 - <<'PY'
+          import re, sys
+          def parse(path):
+              vals={}
+              for line in open(path):
+                  m=re.match(r'(Benchmark\S+)\s+\d+\s+([\d.]+)\s+ns/op', line)
+                  if m: vals.setdefault(m.group(1),[]).append(float(m.group(2)))
+              return {k:sum(v)/len(v) for k,v in vals.items()}
+          old,new=parse('old.txt'),parse('new.txt')
+          bad=[]
+          for k,nv in new.items():
+              if k in old and old[k]>0 and nv > old[k]*1.15:
+                  bad.append(f"{k}: {old[k]:.0f} -> {nv:.0f} ns/op (+{(nv/old[k]-1)*100:.1f}%)")
+          if bad:
+              print("benchmark regression(s) beyond 15%:"); print("\n".join(bad)); sys.exit(1)
+          print("no significant benchmark regressions")
+          PY

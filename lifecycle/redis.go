@@ -26,6 +26,10 @@ import (
 type RedisStore struct {
 	client redis.Cmdable
 	prefix string
+	// now supplies the timestamp passed to the Lua scripts. It defaults to
+	// time.Now and is only overridden in tests to assert lease-boundary
+	// behavior deterministically (mirrors MemoryStore's injectable clock).
+	now func() time.Time
 }
 
 // RedisOption configures a RedisStore.
@@ -53,7 +57,7 @@ func NewRedisStore(client redis.Cmdable, opts ...RedisOption) (*RedisStore, erro
 	for _, opt := range opts {
 		opt(o)
 	}
-	return &RedisStore{client: client, prefix: o.prefix}, nil
+	return &RedisStore{client: client, prefix: o.prefix, now: time.Now}, nil
 }
 
 func (s *RedisStore) key(k string) string { return s.prefix + k }
@@ -67,7 +71,7 @@ func (s *RedisStore) key(k string) string { return s.prefix + k }
 //   - running by other, lease past  -> take over: set running + new lease
 //   - no hash present               -> create: set running + new lease
 func (s *RedisStore) Acquire(ctx context.Context, key, instanceID string, lease time.Duration) (Status, error) {
-	nowMs := time.Now().UnixMilli()
+	nowMs := s.now().UnixMilli()
 	leaseMs := lease.Milliseconds()
 	res, err := acquireScript.Run(ctx, s.client, []string{s.key(key)},
 		instanceID, leaseMs, nowMs).Result()
@@ -79,7 +83,7 @@ func (s *RedisStore) Acquire(ctx context.Context, key, instanceID string, lease 
 
 // Refresh implements Store.
 func (s *RedisStore) Refresh(ctx context.Context, key, instanceID string, lease time.Duration) error {
-	nowMs := time.Now().UnixMilli()
+	nowMs := s.now().UnixMilli()
 	leaseMs := lease.Milliseconds()
 	res, err := refreshScript.Run(ctx, s.client, []string{s.key(key)},
 		instanceID, leaseMs, nowMs).Int()
@@ -94,7 +98,7 @@ func (s *RedisStore) Refresh(ctx context.Context, key, instanceID string, lease 
 
 // Complete implements Store.
 func (s *RedisStore) Complete(ctx context.Context, key, instanceID string) error {
-	nowMs := time.Now().UnixMilli()
+	nowMs := s.now().UnixMilli()
 	res, err := completeScript.Run(ctx, s.client, []string{s.key(key)},
 		instanceID, nowMs).Int()
 	if err != nil {
@@ -108,7 +112,7 @@ func (s *RedisStore) Complete(ctx context.Context, key, instanceID string) error
 
 // Fail implements Store.
 func (s *RedisStore) Fail(ctx context.Context, key, instanceID, errMsg string, retryable bool) error {
-	nowMs := time.Now().UnixMilli()
+	nowMs := s.now().UnixMilli()
 	retryFlag := "0"
 	if retryable {
 		retryFlag = "1"

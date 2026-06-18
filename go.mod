@@ -3,6 +3,7 @@ module github.com/rbaliyan/event-extras
 go 1.26.4
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/lib/pq v1.12.3
 	github.com/rbaliyan/event/v3 v3.17.4
